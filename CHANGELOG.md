@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- Two Claude Code sessions with different installs of the mod (or one session started before an update) no longer take turns restarting the shared reader server, which could also open a second reader window. Only a server of an older version is replaced now.
+- README: install steps one command at a time, and a note that the "userConfig options not yet set" message after installing is harmless.
+
 ## 0.1.0
 
 First release.

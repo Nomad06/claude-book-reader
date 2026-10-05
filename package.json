@@ -1,6 +1,6 @@
 {
   "name": "claude-book-reader",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A Claude Code mod that opens your PDF book while Claude works.",
   "license": "Apache-2.0",

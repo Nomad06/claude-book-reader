@@ -55,10 +55,13 @@ the reader's own dialog and the band above Claude's prompt still tell you.
 
 ### From this repository (a plugin marketplace)
 
-In Claude Code:
+In Claude Code, send these as two separate messages:
 
 ```
 /plugin marketplace add Nomad06/claude-book-reader
+```
+
+```
 /plugin install book-reader@claude-book-reader
 ```
 
@@ -71,6 +74,13 @@ claude plugin marketplace add Nomad06/claude-book-reader
 ```bash
 claude plugin install book-reader@claude-book-reader
 ```
+
+Then start a new Claude Code session. If the install says some "userConfig
+options are not yet set", that's fine: every setting has a default (see
+[Settings](#settings)).
+
+To update later: `claude plugin marketplace update claude-book-reader`, then
+`claude plugin update book-reader@claude-book-reader`.
 
 ### From a clone
 

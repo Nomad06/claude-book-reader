@@ -205,6 +205,29 @@ describe('book-reader', () => {
     expect(runs).toHaveLength(0)
   })
 
+  test('a server from another install of the same version is shared, not restarted', async ($, on) => {
+    const { posted, runs } = world(on, { viewers: 1, hasBook: true, launchedFrom: '/elsewhere/book-reader' })
+
+    await $.command.run({ ...RUN, command: 'book', args: 'list' })
+    expect(posted('/api/shutdown')).toHaveLength(0)
+    expect(runs).toHaveLength(0)
+  })
+
+  test('a newer server is kept for an older install', async ($, on) => {
+    const { posted } = world(on, { viewers: 1, hasBook: true, version: '1.10.0' })
+
+    await $.command.run({ ...RUN, command: 'book', args: 'list' })
+    expect(posted('/api/shutdown')).toHaveLength(0)
+  })
+
+  test('a server that reports no version is replaced', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, version: '' }
+    const { posted } = world(on, reader)
+
+    await $.command.run({ ...RUN, command: 'book', args: 'list' })
+    expect(posted('/api/shutdown')).toHaveLength(1)
+  })
+
   test('the server is started with node and told which install started it', async ($, on) => {
     const reader: Reader = { viewers: 0, hasBook: true, isUp: false }
     const { daemon, root } = world(on, reader)

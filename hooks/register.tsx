@@ -93,8 +93,8 @@ async function isUp($: EngineInterface): Promise<boolean> {
   return (await health($))?.app === 'book-reader'
 }
 
-// The version in this plugin's manifest: a server that reports another one,
-// or runs from another folder, is left over from an older install.
+// The version in this plugin's manifest: a server that reports an older one is
+// left over from before an update.
 async function pluginVersion($: EngineInterface): Promise<string> {
   if (live.version) return live.version
   try {
@@ -163,7 +163,9 @@ async function ensureServer($: EngineInterface): Promise<void> {
     throw new Error(`port ${cfg.port} is taken by another program; pick another "Reader server port" in /config`)
   }
   if (running !== null) {
-    if (running.version === version && running.launchedFrom === $.plugin.root) return
+    // Several installs can share one server (two sessions, an update mid-session):
+    // the newest version serves them all, so only an older one is replaced.
+    if (!isOlderVersion(running.version, version)) return
     await stopServer($)
   }
   const node = await findNode($)
@@ -423,6 +425,16 @@ async function resolvePath($: EngineInterface, raw: string): Promise<string> {
   const cwd = (await $.session.cwd()).replace(/[\\/]+$/, '')
   const separator = windows ? '\\' : '/'
   return `${cwd}${separator}${path.replace(/^\.[\\/]/, '')}`
+}
+
+function isOlderVersion(running: string | undefined, mine: string): boolean {
+  const parts = (version: string) => version.split(/[.+-]/).slice(0, 3).map(part => Number.parseInt(part, 10) || 0)
+  if (!running) return true
+  const [a, b] = [parts(running), parts(mine)]
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0)
+  }
+  return false
 }
 
 function isAbsolutePath(path: string, windows: boolean): boolean {
