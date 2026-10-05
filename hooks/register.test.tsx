@@ -41,7 +41,8 @@ function world(on: On, reader: Reader, hostOptions: Host = {}) {
   let pluginRoot = ''
   mock.env(on, host.os === 'windows' ? { OS: 'Windows_NT', ProgramFiles: 'C:\\Program Files' } : {})
   on('fs.read', ($, e) => {
-    if (!e.path.endsWith(MANIFEST)) return { deny: 'not in this test' }
+    // On Windows the engine hands the path over with backslashes.
+    if (!e.path.replaceAll('\\', '/').endsWith(MANIFEST)) return { deny: 'not in this test' }
     pluginRoot = e.path.slice(0, -MANIFEST.length)
     return { value: JSON.stringify({ version: '1.2.3' }) }
   })
