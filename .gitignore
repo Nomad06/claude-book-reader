@@ -1,0 +1,7 @@
+# Written by Claude Code each time it loads the mod: machine-specific, and it
+# lists the MCP servers connected on that machine.
+.claude-plugin/types/
+
+node_modules/
+.DS_Store
+*.log

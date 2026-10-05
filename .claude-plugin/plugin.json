@@ -1,0 +1,63 @@
+{
+  "name": "book-reader",
+  "version": "0.1.0",
+  "description": "Opens your PDF book while Claude works, resumes where you stopped, remembers read pages, and tells you when the task is done.",
+  "author": {
+    "name": "Nomad06",
+    "url": "https://github.com/Nomad06"
+  },
+  "homepage": "https://github.com/Nomad06/claude-book-reader",
+  "repository": "https://github.com/Nomad06/claude-book-reader",
+  "license": "Apache-2.0",
+  "keywords": [
+    "pdf",
+    "reader",
+    "books",
+    "reading",
+    "mod",
+    "hooks"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open the book automatically",
+      "description": "Open the current book when a task has been running for the delay below.",
+      "default": true
+    },
+    "openDelaySeconds": {
+      "type": "number",
+      "title": "Delay before opening (seconds)",
+      "description": "How long a task must run before the book opens; 0 opens it at once.",
+      "default": 5
+    },
+    "window": {
+      "type": "string",
+      "title": "Reader window",
+      "description": "app: a window of its own in Chrome, Edge, Brave, Chromium or Vivaldi when one is installed; browser: a tab in your default browser.",
+      "options": [
+        "app",
+        "browser"
+      ],
+      "default": "app"
+    },
+    "notify": {
+      "type": "boolean",
+      "title": "Desktop notification when a task finishes",
+      "description": "Show a desktop notification (besides the dialog in the reader) when the task you were reading through ends. On Linux this needs notify-send.",
+      "default": true
+    },
+    "port": {
+      "type": "number",
+      "title": "Reader server port",
+      "description": "Local port of the reader server (127.0.0.1 only).",
+      "default": 47321
+    },
+    "nodePath": {
+      "type": "string",
+      "title": "Path to node",
+      "description": "Leave empty to find node on PATH and in the usual install folders (Homebrew, nvm, fnm, Volta, asdf, mise; Program Files on Windows).",
+      "default": ""
+    }
+  }
+}

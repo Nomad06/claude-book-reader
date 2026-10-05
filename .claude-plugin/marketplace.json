@@ -1,0 +1,32 @@
+{
+  "name": "claude-book-reader",
+  "owner": {
+    "name": "Nomad06",
+    "url": "https://github.com/Nomad06"
+  },
+  "metadata": {
+    "description": "Read a PDF book while Claude Code works."
+  },
+  "plugins": [
+    {
+      "name": "book-reader",
+      "source": "./",
+      "description": "Opens your PDF book while Claude works, resumes where you stopped, remembers read pages, and tells you when the task is done.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Nomad06",
+        "url": "https://github.com/Nomad06"
+      },
+      "homepage": "https://github.com/Nomad06/claude-book-reader",
+      "license": "Apache-2.0",
+      "keywords": [
+        "pdf",
+        "reader",
+        "books",
+        "reading",
+        "mod",
+        "hooks"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Same bytes on every OS: no CRLF rewriting on Windows checkouts.
+* text=auto eol=lf
+
+*.bcmap binary
+*.pfb binary
+*.ttf binary
+*.wasm binary
+*.icc binary
+*.gif binary
+*.png binary
+*.jpg binary

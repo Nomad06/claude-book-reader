@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Book Reader</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
+  <link rel="stylesheet" href="vendor/pdfjs/web/pdf_viewer.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="toolbar" role="toolbar">
+    <div class="group">
+      <button id="sidebarToggle" class="icon" title="Sidebar (b)" aria-label="Toggle sidebar">
+        <svg viewBox="0 0 20 20"><path d="M3 4h14M3 10h14M3 16h14"/></svg>
+      </button>
+      <div class="title" id="bookTitle" title="">Book Reader</div>
+    </div>
+
+    <div class="group nav">
+      <button id="prevPage" class="icon" title="Previous page (←, k)" aria-label="Previous page">
+        <svg viewBox="0 0 20 20"><path d="M12.5 4 6.5 10l6 6"/></svg>
+      </button>
+      <label class="page-box">
+        <input id="pageInput" type="number" min="1" value="1" inputmode="numeric" title="Go to page (g)" aria-label="Page number">
+        <span>/ <span id="pageCount">–</span></span>
+      </label>
+      <button id="nextPage" class="icon" title="Next page (→, j)" aria-label="Next page">
+        <svg viewBox="0 0 20 20"><path d="m7.5 4 6 6-6 6"/></svg>
+      </button>
+      <span class="sep"></span>
+      <button id="zoomOut" class="icon" title="Zoom out (−)" aria-label="Zoom out">
+        <svg viewBox="0 0 20 20"><path d="M5 10h10"/></svg>
+      </button>
+      <select id="zoomSelect" title="Zoom" aria-label="Zoom">
+        <option value="auto">Auto</option>
+        <option value="page-width">Page width</option>
+        <option value="page-fit">Whole page</option>
+        <option value="page-actual">Actual size</option>
+        <option value="0.5">50%</option>
+        <option value="0.75">75%</option>
+        <option value="1">100%</option>
+        <option value="1.25">125%</option>
+        <option value="1.5">150%</option>
+        <option value="2">200%</option>
+        <option value="3">300%</option>
+        <option value="4">400%</option>
+        <option value="custom" id="zoomCustom" hidden disabled></option>
+      </select>
+      <button id="zoomIn" class="icon" title="Zoom in (+)" aria-label="Zoom in">
+        <svg viewBox="0 0 20 20"><path d="M5 10h10M10 5v10"/></svg>
+      </button>
+    </div>
+
+    <div class="group right">
+      <div id="taskChip" class="chip" hidden></div>
+      <button id="markRead" class="pill" title="Mark this page read / unread (m)">
+        <span class="dot"></span><span id="readLabel">0 / 0 read</span>
+      </button>
+      <button id="findToggle" class="icon" title="Find (⌘F or /)" aria-label="Find">
+        <svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5"/><path d="m12.5 12.5 4 4"/></svg>
+      </button>
+      <button id="themeToggle" class="icon" title="Theme: light · sepia · dark (t)" aria-label="Change theme">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 3.5v13a6.5 6.5 0 0 0 0-13z" class="fill"/></svg>
+      </button>
+      <button id="helpToggle" class="icon" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M8 8a2 2 0 1 1 2.8 1.8c-.5.3-.8.7-.8 1.2v.5M10 14.2v.3"/></svg>
+      </button>
+    </div>
+    <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>
+  </header>
+
+  <div id="findbar" class="findbar" hidden>
+    <input id="findInput" type="search" placeholder="Find in book…" aria-label="Find in book">
+    <button id="findPrev" class="icon" title="Previous match (⇧Enter)" aria-label="Previous match"><svg viewBox="0 0 20 20"><path d="m5 12.5 5-5 5 5"/></svg></button>
+    <button id="findNext" class="icon" title="Next match (Enter)" aria-label="Next match"><svg viewBox="0 0 20 20"><path d="m5 7.5 5 5 5-5"/></svg></button>
+    <span id="findCount" class="muted"></span>
+    <button id="findClose" class="icon" title="Close (Esc)" aria-label="Close find"><svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+  </div>
+
+  <div class="layout">
+    <aside id="sidebar" class="sidebar" hidden>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="contents" aria-selected="true">Contents</button>
+        <button role="tab" data-tab="pages">Pages</button>
+        <button role="tab" data-tab="library">Library</button>
+      </nav>
+      <section data-panel="contents" class="panel">
+        <div id="outline" class="outline"><p class="muted">No table of contents in this book.</p></div>
+      </section>
+      <section data-panel="pages" class="panel" hidden>
+        <div class="panel-actions">
+          <button id="firstUnread" class="link">Jump to first unread page</button>
+          <span class="legend"><i class="sw read"></i>read <i class="sw cur"></i>current</span>
+        </div>
+        <div id="pageGrid" class="page-grid"></div>
+        <div class="panel-actions bottom">
+          <label class="muted">Mark read after
+            <select id="readSeconds">
+              <option value="3">3 s</option><option value="6">6 s</option><option value="10">10 s</option>
+              <option value="20">20 s</option><option value="40">40 s</option>
+            </select> on a page</label>
+          <button id="resetProgress" class="link danger">Reset progress</button>
+        </div>
+      </section>
+      <section data-panel="library" class="panel" hidden>
+        <button id="chooseBook2" class="primary wide">Open a PDF…</button>
+        <ul id="library" class="library"></ul>
+      </section>
+    </aside>
+
+    <div id="viewerContainer" role="main" tabindex="0">
+      <div id="viewer" class="pdfViewer"></div>
+    </div>
+  </div>
+
+  <div id="empty" class="empty" hidden>
+    <div class="empty-card">
+      <div class="big">📖</div>
+      <h1>Pick a book for while Claude works</h1>
+      <p class="muted">It opens by itself when a task runs, at the page where you stopped.</p>
+      <button id="chooseBook" class="primary">Choose a PDF…</button>
+      <ul id="emptyLibrary" class="library"></ul>
+    </div>
+  </div>
+
+  <dialog id="doneDialog" class="dialog">
+    <form method="dialog">
+      <div class="dialog-icon" id="doneIcon">✓</div>
+      <h2 id="doneTitle">Claude finished the task</h2>
+      <p class="muted" id="doneMeta"></p>
+      <blockquote id="doneSummary" hidden></blockquote>
+      <p id="doneWhere" class="where"></p>
+      <div class="dialog-actions">
+        <button value="keep" id="keepReading" autofocus>Keep reading <kbd>Esc</kbd></button>
+        <button value="close" id="closeBook" class="primary">Close book <kbd>C</kbd></button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="helpDialog" class="dialog help">
+    <form method="dialog">
+      <h2>Keyboard</h2>
+      <dl class="keys">
+        <dt>→ j n</dt><dd>Next page</dd>
+        <dt>← k p</dt><dd>Previous page</dd>
+        <dt>Space ⇧Space</dt><dd>Scroll down / up</dd>
+        <dt>Home End</dt><dd>First / last page</dd>
+        <dt>g</dt><dd>Go to page</dd>
+        <dt>+ − 0</dt><dd>Zoom in / out / page width</dd>
+        <dt>⌘ + scroll, pinch</dt><dd>Zoom</dd>
+        <dt>⌘F /</dt><dd>Find</dd>
+        <dt>m</dt><dd>Mark page read / unread</dd>
+        <dt>u</dt><dd>First unread page</dd>
+        <dt>b</dt><dd>Sidebar</dd>
+        <dt>t</dt><dd>Theme</dd>
+      </dl>
+      <div class="dialog-actions"><button value="ok" class="primary">Got it</button></div>
+    </form>
+  </dialog>
+
+  <div id="closedNote" class="closed-note" hidden>
+    <div class="empty-card">
+      <div class="big">🔖</div>
+      <h1>Bookmarked</h1>
+      <p class="muted" id="closedWhere"></p>
+      <p class="muted">You can close this window. It opens again on the next long task.</p>
+      <button id="reopen" class="primary">Keep reading</button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>
