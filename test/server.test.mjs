@@ -138,7 +138,8 @@ before(async () => {
 })
 
 after(async () => {
-  child?.kill()
+  // Wait for the server to exit: a save it had scheduled must not land while the folder goes.
+  if (child && child.exitCode === null) await new Promise(resolve => child.once('exit', resolve).kill())
   await fs.rm(dataDir, { recursive: true, force: true })
   await fs.rm(fixtures, { recursive: true, force: true })
 })
