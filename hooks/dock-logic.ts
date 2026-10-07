@@ -1,4 +1,4 @@
-import type { BookSummary } from '../types'
+import type { BookDetail, BookSummary, DockSnapshot, DockTask, OutlineEntry } from '../types'
 
 // Everything the Reading Dock shows, worked out without `$`: dock.tsx draws
 // it and the tests call it directly.
@@ -120,4 +120,127 @@ export type Tier = 'full' | 'compact' | 'tiny'
 
 export function tier(columns: number): Tier {
   return columns >= 64 ? 'full' : columns >= 40 ? 'compact' : 'tiny'
+}
+
+export type ChapterRow = {
+  title: string
+  page: number
+  endPage: number
+  status: 'done' | 'current' | 'todo'
+  percent: number
+  readPages: number
+}
+
+/** The chapters the dock lists: top level, or two levels when the top has fewer than three. */
+export function chapters(outline: OutlineEntry[] | null, read: readonly number[], page: number, pages: number | null): ChapterRow[] {
+  if (!outline || outline.length === 0) return []
+  const top = outline.filter(entry => entry.level === 0)
+  const picked = (top.length >= 3 ? top : outline.filter(entry => entry.level <= 1)).slice().sort((a, b) => a.page - b.page)
+  const last = pages ?? Math.max(page, ...picked.map(entry => entry.page))
+  const isRead = new Set(read)
+  const current = picked.reduce((found, entry, i) => (entry.page <= page ? i : found), -1)
+  return picked.map((entry, i) => {
+    const endPage = Math.max(entry.page, (picked[i + 1]?.page ?? last + 1) - 1)
+    let readPages = 0
+    for (let p = entry.page; p <= endPage; p++) if (isRead.has(p)) readPages++
+    const span = endPage - entry.page + 1
+    const status = i === current ? 'current' : readPages === span ? 'done' : 'todo'
+    return { title: entry.title, page: entry.page, endPage, status, percent: Math.round((100 * readPages) / span), readPages }
+  })
+}
+
+/** The first chapter, from the current one on, that still has unread pages. */
+export function nextUp(rows: ChapterRow[]): { title: string; pagesLeft: number } | null {
+  const start = Math.max(0, rows.findIndex(row => row.status === 'current'))
+  const row = rows.slice(start).find(one => one.readPages < one.endPage - one.page + 1)
+  return row ? { title: row.title, pagesLeft: row.endPage - row.page + 1 - row.readPages } : null
+}
+
+export type Bucket = 'read' | 'unread' | 'current' | 'none'
+export type HeatCell = { top: Bucket; bottom: Bucket }
+
+/** The read-pages strip: `▀` cells, each an upper and a lower bucket of pages. */
+export function heatmap(read: readonly number[], page: number, pages: number | null, width: number): HeatCell[] {
+  if (!pages || width < 1) return []
+  const size = Math.ceil(pages / (2 * width))
+  const isRead = new Set(read)
+  const bucket = (i: number): Bucket => {
+    const first = i * size + 1
+    if (first > pages) return 'none'
+    const last = Math.min(pages, first + size - 1)
+    if (page >= first && page <= last) return 'current'
+    let count = 0
+    for (let p = first; p <= last; p++) if (isRead.has(p)) count++
+    return count * 2 > last - first + 1 ? 'read' : 'unread'
+  }
+  const cells = Math.ceil(Math.ceil(pages / size) / 2)
+  return Array.from({ length: cells }, (_, i) => ({ top: bucket(2 * i), bottom: bucket(2 * i + 1) }))
+}
+
+/** The done line: how it ended, how long it took, and what you read meanwhile. */
+export function summary(task: DockTask, book: BookSummary | null): string {
+  const took = spoken(task.durationMs ?? (task.endedAt ?? task.startedAt) - task.startedAt)
+  const head =
+    task.reason === 'answer'
+      ? `✓ Task finished in ${took}`
+      : task.reason === 'aborted'
+        ? `■ Task stopped after ${took}`
+        : `⚠ Task ended with an error after ${took}`
+  const count = book && book.id === task.bookId ? book.readCount - task.startReadCount : 0
+  if (!book || count <= 0) return head
+  return `${head} · you read ${count} ${count === 1 ? 'page' : 'pages'} (p. ${task.startPage} → ${book.page})`
+}
+
+/** Fills the task's starting place from the first snapshot that has a book. */
+export function withBaseline(task: DockTask | null, snapshot: DockSnapshot | null): DockTask | null {
+  const book = snapshot?.current
+  if (!task || task.bookId !== null || !book) return task
+  return { ...task, bookId: book.id, startPage: book.page, startReadCount: book.readCount }
+}
+
+export function newTask(text: string, now: number, snapshot: DockSnapshot | null): DockTask {
+  const task: DockTask = {
+    name: taskName(text),
+    bookId: null,
+    startPage: 1,
+    startReadCount: 0,
+    startedAt: now,
+    endedAt: null,
+    durationMs: null,
+    reason: null,
+  }
+  return withBaseline(task, snapshot) ?? task
+}
+
+export type DockPhase = 'idle' | 'working' | 'done'
+
+export type DockModel = {
+  phase: DockPhase
+  isServerUp: boolean
+  book: BookDetail | null
+  books: BookSummary[]
+  chapters: ChapterRow[]
+  next: { title: string; pagesLeft: number } | null
+  task: { name: string; elapsed: string } | null
+  summary: string | null
+  reason: DockTask['reason']
+}
+
+/** Everything one drawing of the dock needs. */
+export function dockModel(snapshot: DockSnapshot | null, task: DockTask | null, now: number): DockModel {
+  const isServerUp = snapshot?.isServerUp ?? false
+  const book = isServerUp ? (snapshot?.current ?? null) : null
+  const rows = book ? chapters(book.outline, book.read, book.page, book.pages) : []
+  const isWorking = task !== null && task.endedAt === null
+  return {
+    phase: isWorking ? 'working' : task ? 'done' : 'idle',
+    isServerUp,
+    book,
+    books: isServerUp ? (snapshot?.books ?? []) : [],
+    chapters: rows,
+    next: nextUp(rows),
+    task: isWorking ? { name: task.name, elapsed: clock(now - task.startedAt) } : null,
+    summary: task && !isWorking ? summary(task, book) : null,
+    reason: task?.reason ?? null,
+  }
 }

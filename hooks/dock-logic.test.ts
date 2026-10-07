@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { SPINES, badge, bar, clock, gradient, initials, percent, spaced, spineColor, spoken, taskName, tier } from './dock-logic.ts'
+import {
+  SPINES, badge, bar, chapters, clock, dockModel, gradient, heatmap, initials, newTask, nextUp, percent, spaced,
+  spineColor, spoken, summary, taskName, tier, withBaseline,
+} from './dock-logic.ts'
 
 const BOOK = { id: 'abc123abc123', path: '/books/dune.pdf', title: 'Dune', page: 42, pages: 300, readCount: 37, openedAt: 1 }
 
@@ -69,5 +72,158 @@ describe('dock text', () => {
     expect(tier(63)).toBe('compact')
     expect(tier(40)).toBe('compact')
     expect(tier(39)).toBe('tiny')
+  })
+})
+
+const OUTLINE = [
+  { title: 'Arrakis', page: 1, level: 0 },
+  { title: 'Paul', page: 3, level: 1 },
+  { title: 'Muad’Dib', page: 5, level: 0 },
+  { title: 'The Prophet', page: 8, level: 0 },
+]
+const DETAIL = { ...BOOK, read: [1, 2, 3], outline: OUTLINE }
+const SNAPSHOT = { isServerUp: true, current: DETAIL, books: [BOOK], viewers: 1 }
+const TASK = {
+  name: 'Refactor auth middleware',
+  bookId: BOOK.id,
+  startPage: 42,
+  startReadCount: 37,
+  startedAt: 0,
+  endedAt: 134_000,
+  durationMs: 134_000,
+  reason: 'answer' as const,
+}
+
+describe('dock chapters', () => {
+  test('top-level chapters with ticks, the current one with its share read', () => {
+    expect(chapters(OUTLINE, [1, 2, 3, 4, 5], 6, 10)).toEqual([
+      { title: 'Arrakis', page: 1, endPage: 4, status: 'done', percent: 100, readPages: 4 },
+      { title: 'Muad’Dib', page: 5, endPage: 7, status: 'current', percent: 33, readPages: 1 },
+      { title: 'The Prophet', page: 8, endPage: 10, status: 'todo', percent: 0, readPages: 0 },
+    ])
+  })
+
+  test('with fewer than three top-level entries the next level is listed too', () => {
+    const outline = [
+      { title: 'A', page: 1, level: 0 },
+      { title: 'a1', page: 2, level: 1 },
+      { title: 'B', page: 5, level: 0 },
+    ]
+    expect(chapters(outline, [], 1, 6).map(row => [row.title, row.page, row.endPage, row.status])).toEqual([
+      ['A', 1, 1, 'current'],
+      ['a1', 2, 4, 'todo'],
+      ['B', 5, 6, 'todo'],
+    ])
+  })
+
+  test('no outline, an empty one, a page before the first chapter, an unknown page count', () => {
+    expect(chapters(null, [], 1, 10)).toEqual([])
+    expect(chapters([], [], 1, 10)).toEqual([])
+    const late = [
+      { title: 'A', page: 3, level: 0 },
+      { title: 'B', page: 5, level: 0 },
+      { title: 'C', page: 8, level: 0 },
+    ]
+    expect(chapters(late, [], 1, 10).some(row => row.status === 'current')).toBe(false)
+    expect(chapters(late, [], 9, null).at(-1)).toEqual({ title: 'C', page: 8, endPage: 9, status: 'current', percent: 0, readPages: 0 })
+  })
+
+  test('next up is the first chapter from the current one with pages left', () => {
+    const rows = chapters(OUTLINE, [1, 2, 3, 4, 5], 6, 10)
+    expect(nextUp(rows)).toEqual({ title: 'Muad’Dib', pagesLeft: 2 })
+    expect(nextUp(chapters(OUTLINE, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 10, 10))).toBe(null)
+    expect(nextUp([])).toBe(null)
+  })
+})
+
+describe('dock heatmap', () => {
+  test('one cell holds two page buckets; the current page shows on its own', () => {
+    const cells = heatmap([1, 2], 3, 10, 10)
+    expect(cells).toHaveLength(5)
+    expect(cells.slice(0, 2)).toEqual([
+      { top: 'read', bottom: 'read' },
+      { top: 'current', bottom: 'unread' },
+    ])
+  })
+
+  test('a long book fits the width; the last half-cell past the end is empty', () => {
+    const all = Array.from({ length: 590 }, (_, i) => i + 1)
+    const cells = heatmap(all, 1, 590, 56)
+    expect(cells).toHaveLength(50)
+    expect(cells[0]).toEqual({ top: 'current', bottom: 'read' })
+    expect(cells[49]).toEqual({ top: 'read', bottom: 'none' })
+  })
+
+  test('a bucket counts as read when more than half of it is read', () => {
+    expect(heatmap([1], 5, 12, 3)[0]).toEqual({ top: 'unread', bottom: 'unread' })
+    expect(heatmap([1, 2], 5, 12, 3)[0]).toEqual({ top: 'read', bottom: 'unread' })
+  })
+
+  test('nothing to draw without a page count or room', () => {
+    expect(heatmap([], 1, null, 10)).toEqual([])
+    expect(heatmap([], 1, 10, 0)).toEqual([])
+  })
+})
+
+describe('dock summary and model', () => {
+  test('the summary says how long it took and what you read meanwhile', () => {
+    const after = { ...BOOK, page: 48, readCount: 43 }
+    expect(summary(TASK, after)).toBe('✓ Task finished in 2m 14s · you read 6 pages (p. 42 → 48)')
+    expect(summary(TASK, { ...after, readCount: 38 })).toBe('✓ Task finished in 2m 14s · you read 1 page (p. 42 → 48)')
+    expect(summary(TASK, { ...after, readCount: 37 })).toBe('✓ Task finished in 2m 14s')
+    expect(summary(TASK, null)).toBe('✓ Task finished in 2m 14s')
+    expect(summary({ ...TASK, reason: 'aborted' }, BOOK)).toBe('■ Task stopped after 2m 14s')
+    expect(summary({ ...TASK, reason: 'error' }, BOOK)).toBe('⚠ Task ended with an error after 2m 14s')
+  })
+
+  test('after switching books the summary claims no pages', () => {
+    expect(summary(TASK, { ...BOOK, id: 'ffffffffffff', page: 9, readCount: 80 })).toBe('✓ Task finished in 2m 14s')
+  })
+
+  test('the starting place comes from the first snapshot that has a book', () => {
+    const blank = newTask('Fix it. Now', 1_000, null)
+    expect(blank).toEqual({
+      name: 'Fix it',
+      bookId: null,
+      startPage: 1,
+      startReadCount: 0,
+      startedAt: 1_000,
+      endedAt: null,
+      durationMs: null,
+      reason: null,
+    })
+    expect(withBaseline(blank, SNAPSHOT)).toEqual({ ...blank, bookId: BOOK.id, startPage: 42, startReadCount: 37 })
+    const later = { ...SNAPSHOT, current: { ...DETAIL, page: 50, readCount: 45 } }
+    const filled = withBaseline(blank, SNAPSHOT)
+    expect(withBaseline(filled, later)).toBe(filled)
+    expect(withBaseline(blank, null)).toBe(blank)
+    expect(withBaseline(null, SNAPSHOT)).toBe(null)
+    expect(newTask('Go', 5, SNAPSHOT).startPage).toBe(42)
+  })
+
+  test('the model: idle, working with a timer, done with the summary', () => {
+    expect(dockModel(null, null, 0)).toEqual({
+      phase: 'idle',
+      isServerUp: false,
+      book: null,
+      books: [],
+      chapters: [],
+      next: null,
+      task: null,
+      summary: null,
+      reason: null,
+    })
+    const working = dockModel(SNAPSHOT, { ...TASK, startedAt: 1_000, endedAt: null, durationMs: null, reason: null }, 43_000)
+    expect(working.phase).toBe('working')
+    expect(working.task).toEqual({ name: 'Refactor auth middleware', elapsed: '0:42' })
+    expect(working.book?.title).toBe('Dune')
+    expect(working.summary).toBe(null)
+    const done = dockModel(SNAPSHOT, TASK, 200_000)
+    expect(done.phase).toBe('done')
+    expect(done.task).toBe(null)
+    expect(done.summary).toBe('✓ Task finished in 2m 14s')
+    expect(done.reason).toBe('answer')
+    const down = dockModel({ isServerUp: false, current: null, books: [], viewers: 0 }, null, 0)
+    expect(down.isServerUp).toBe(false)
   })
 })
