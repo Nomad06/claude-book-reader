@@ -17,7 +17,16 @@ import crypto from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { appWindow, defaultBrowser, filePicker, noPickerReason, notification } from './platform.mjs'
+import {
+  appWindow,
+  cleanTarget,
+  closeAppWindow,
+  defaultBrowser,
+  filePicker,
+  focusApp,
+  noPickerReason,
+  notification,
+} from './platform.mjs'
 
 const APP = 'book-reader'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -34,6 +43,7 @@ const ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`])
 const CAN_LAUNCH = !args['no-launch']
 const LAUNCHED_FROM = typeof args['launched-from'] === 'string' ? args['launched-from'] : null
+const PROFILE_DIR = path.join(DATA_DIR, 'reader-profile')
 
 // Sent with every response: no other site may embed or sniff what this server serves.
 const BASE_HEADERS = {
@@ -214,7 +224,9 @@ async function isPdf(file) {
 
 // ---------------------------------------------------------------- task + viewers
 
-let task = { state: 'idle', seq: 0, acked: true, startedAt: null, endedAt: null, durationMs: null, summary: '' }
+let task = { state: 'idle', seq: 0, acked: true, canReturn: false, startedAt: null, endedAt: null, durationMs: null, summary: '' }
+// Where the Claude Code session runs (an app, a window, a process), as the mod last said.
+let returnTo = null
 const clients = new Map() // id -> res
 let lastActivity = Date.now()
 let lastLaunchAt = 0
@@ -313,11 +325,32 @@ async function chooseFile() {
   throw httpError(500, stderr.trim() || `the file dialog failed (exit ${code})`)
 }
 
+/** Brings the app that runs the Claude Code session to the front. */
+async function focusClaude() {
+  if (!CAN_LAUNCH) return { focused: false, reason: 'off' }
+  const plan = focusApp({ ...host, target: returnTo })
+  if (!plan) return { focused: false, reason: 'unknown-app' }
+  const { code, stderr } = await runPlan(plan, 10_000)
+  if (code !== 0) console.error(`[book-reader] could not switch to Claude: ${stderr.trim() || `exit ${code}`}`)
+  return { focused: code === 0 }
+}
+
+/** Closes the reader's own browser instance, if it runs. */
+function closeReaderWindow() {
+  if (!CAN_LAUNCH) return
+  const plan = closeAppWindow({ ...host, profileDir: PROFILE_DIR })
+  if (plan) runPlan(plan, 10_000)
+}
+
+function canReturn() {
+  return CAN_LAUNCH && focusApp({ ...host, target: returnTo }) !== null
+}
+
 function launchViewer(mode) {
   const url = `http://127.0.0.1:${PORT}/`
   lastLaunchAt = Date.now()
   if (!CAN_LAUNCH) return 'none'
-  const app = mode === 'app' ? appWindow({ ...host, url }) : null
+  const app = mode === 'app' ? appWindow({ ...host, url, profileDir: PROFILE_DIR }) : null
   if (app && launchPlan(app)) return 'app'
   const browser = defaultBrowser({ ...host, url })
   const isBare = !/[\\/]/.test(browser.command)
@@ -562,12 +595,14 @@ async function route(req, res) {
   if (p === '/api/task' && m === 'POST') {
     const body = await readBody(req)
     const now = Date.now()
+    if (body.returnTo !== undefined) returnTo = cleanTarget(body.returnTo) ?? returnTo
     if (body.state === 'running') {
-      setTask({ state: 'running', acked: false, startedAt: now, endedAt: null, durationMs: null, summary: '' })
+      setTask({ state: 'running', acked: false, canReturn: canReturn(), startedAt: now, endedAt: null, durationMs: null, summary: '' })
     } else if (['done', 'aborted', 'error'].includes(body.state)) {
       setTask({
         state: body.state,
         acked: false,
+        canReturn: canReturn(),
         endedAt: now,
         durationMs: Number.isFinite(body.durationMs) ? body.durationMs : null,
         summary: typeof body.summary === 'string' ? body.summary.slice(0, 600) : '',
@@ -586,10 +621,23 @@ async function route(req, res) {
     return sendJson(res, 200, { task, viewers: clients.size })
   }
 
-  if (p === '/api/close' && m === 'POST') {
+  if (p === '/api/focus' && m === 'POST') {
+    const focused = await focusClaude()
     task = { ...task, acked: true }
+    broadcast({ type: 'task', task })
+    return sendJson(res, 200, focused)
+  }
+
+  if (p === '/api/close' && m === 'POST') {
+    const body = await readBody(req)
+    // From the reader: back to Claude first, so the person lands there.
+    const focused = body.focus === true ? await focusClaude() : { focused: false }
+    task = { ...task, acked: true }
+    const open = clients.size
     broadcast({ type: 'close' })
-    return sendJson(res, 200, { closed: clients.size })
+    // The page saves its place and tries to close itself; then the window goes.
+    setTimeout(closeReaderWindow, 800)
+    return sendJson(res, 200, { closed: open, ...focused })
   }
 
   if (p === '/api/shutdown' && m === 'POST') {

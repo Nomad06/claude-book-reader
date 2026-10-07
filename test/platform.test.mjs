@@ -8,18 +8,31 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 
+import { readFileSync } from 'node:fs'
+
 import {
+  WINDOWS_CLOSE_READER,
+  WINDOWS_FOCUS,
   WINDOWS_NOTIFICATION,
   WINDOWS_PICKER,
   appWindow,
   appleString,
+  cleanTarget,
+  closeAppWindow,
   defaultBrowser,
   filePicker,
+  focusApp,
   noPickerReason,
   notification,
 } from '../server/platform.mjs'
 
-const URL = 'http://127.0.0.1:47321/'
+// The mod's own PowerShell (it finds the window that runs the session).
+const WINDOWS_HOST_PID = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8').match(
+  /const WINDOWS_HOST_PID = `([\s\S]*?)`/,
+)[1]
+
+const READER_URL = 'http://127.0.0.1:47321/'
+const PROFILE = '/home/me/.claude/book-reader/reader-profile'
 const nothing = () => false
 const only = (...names) => name => names.includes(name)
 
@@ -43,20 +56,39 @@ describe('macOS', () => {
 
   test('opens an app window with the first Chromium browser installed', () => {
     const exists = file => file === '/Applications/Microsoft Edge.app'
-    const plan = appWindow({ platform: 'darwin', url: URL, env: {}, has: nothing, exists, homedir: '/Users/me' })
+    const plan = appWindow({ platform: 'darwin', url: READER_URL, profileDir: PROFILE, env: {}, has: nothing, exists, homedir: '/Users/me' })
     assert.deepEqual(plan.args.slice(0, 2), ['-na', 'Microsoft Edge'])
-    assert.ok(plan.args.includes(`--app=${URL}`))
+    assert.ok(plan.args.includes(`--app=${READER_URL}`))
+  })
+
+  test('the reader window runs in its own profile, so it can be closed', () => {
+    const exists = file => file === '/Applications/Google Chrome.app'
+    const plan = appWindow({ platform: 'darwin', url: READER_URL, profileDir: PROFILE, env: {}, has: nothing, exists, homedir: '/Users/me' })
+    assert.ok(plan.args.includes(`--user-data-dir=${PROFILE}`))
+    assert.ok(plan.args.includes('--no-first-run'))
+    const close = closeAppWindow({ platform: 'darwin', profileDir: '/Users/me/.claude/book-reader/reader-profile', has: nothing })
+    assert.equal(close.command, '/usr/bin/pkill')
+    assert.deepEqual(close.args, ['-f', '--', '--user-data-dir=/Users/me/\\.claude/book-reader/reader-profile'])
+  })
+
+  test('switches back to the app of the session by its bundle id', () => {
+    assert.deepEqual(focusApp({ platform: 'darwin', has: nothing, target: { bundleId: 'com.anthropic.claudefordesktop' } }), {
+      command: '/usr/bin/open',
+      args: ['-b', 'com.anthropic.claudefordesktop'],
+    })
+    assert.equal(focusApp({ platform: 'darwin', has: nothing, target: { bundleId: '-a Calculator' } }), null)
+    assert.equal(focusApp({ platform: 'darwin', has: nothing, target: null }), null)
   })
 
   test('finds browsers in ~/Applications too', () => {
     const exists = file => file === '/Users/me/Applications/Google Chrome.app'
-    const plan = appWindow({ platform: 'darwin', url: URL, env: {}, has: nothing, exists, homedir: '/Users/me' })
+    const plan = appWindow({ platform: 'darwin', url: READER_URL, profileDir: PROFILE, env: {}, has: nothing, exists, homedir: '/Users/me' })
     assert.equal(plan.args[1], 'Google Chrome')
   })
 
   test('falls back to the default browser', () => {
-    assert.equal(appWindow({ platform: 'darwin', url: URL, env: {}, has: nothing, exists: nothing, homedir: '/Users/me' }), null)
-    assert.deepEqual(defaultBrowser({ platform: 'darwin', url: URL }), { command: '/usr/bin/open', args: [URL] })
+    assert.equal(appWindow({ platform: 'darwin', url: READER_URL, profileDir: PROFILE, env: {}, has: nothing, exists: nothing, homedir: '/Users/me' }), null)
+    assert.deepEqual(defaultBrowser({ platform: 'darwin', url: READER_URL }), { command: '/usr/bin/open', args: [READER_URL] })
   })
 
   test('appleString escapes backslashes before quotes', () => {
@@ -86,13 +118,34 @@ describe('Linux', () => {
     assert.equal(notification({ platform: 'linux', has: nothing, title: 't', subtitle: 's', message: 'm' }), null)
   })
 
+  test('closes the reader with pkill, and switches back by window id', () => {
+    assert.equal(closeAppWindow({ platform: 'linux', profileDir: PROFILE, has: only('pkill') }).command, 'pkill')
+    assert.equal(closeAppWindow({ platform: 'linux', profileDir: PROFILE, has: nothing }), null)
+    assert.deepEqual(focusApp({ platform: 'linux', has: only('xdotool', 'wmctrl'), target: { windowId: '71303175' } }), {
+      command: 'xdotool',
+      args: ['windowactivate', '71303175'],
+    })
+    assert.deepEqual(focusApp({ platform: 'linux', has: only('wmctrl'), target: { windowId: '0x4400007' } }), {
+      command: 'wmctrl',
+      args: ['-i', '-a', '0x4400007'],
+    })
+    assert.equal(focusApp({ platform: 'linux', has: only('xdotool'), target: { windowId: '1; rm -rf ~' } }), null)
+    assert.equal(focusApp({ platform: 'linux', has: nothing, target: { windowId: '71303175' } }), null)
+  })
+
   test('opens an app window with a Chromium browser on PATH, else xdg-open', () => {
-    const plan = appWindow({ platform: 'linux', url: URL, env: {}, has: only('chromium'), exists: nothing, homedir: '/home/me' })
+    const plan = appWindow({ platform: 'linux', url: READER_URL, profileDir: PROFILE, env: {}, has: only('chromium'), exists: nothing, homedir: '/home/me' })
     assert.equal(plan.command, 'chromium')
-    assert.deepEqual(plan.args, [`--app=${URL}`, '--window-size=1000,1200'])
+    assert.deepEqual(plan.args, [
+      `--app=${READER_URL}`,
+      '--window-size=1000,1200',
+      `--user-data-dir=${PROFILE}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+    ])
     assert.equal(plan.detached, true)
-    assert.equal(appWindow({ platform: 'linux', url: URL, env: {}, has: nothing, exists: nothing, homedir: '/home/me' }), null)
-    assert.equal(defaultBrowser({ platform: 'linux', url: URL }).command, 'xdg-open')
+    assert.equal(appWindow({ platform: 'linux', url: READER_URL, profileDir: PROFILE, env: {}, has: nothing, exists: nothing, homedir: '/home/me' }), null)
+    assert.equal(defaultBrowser({ platform: 'linux', url: READER_URL }).command, 'xdg-open')
   })
 })
 
@@ -123,18 +176,29 @@ describe('Windows', () => {
   test('opens an app window with Chrome, else Edge', () => {
     const chrome = 'C:\\Users\\me\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'
     const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
-    const withChrome = appWindow({ platform: 'win32', url: URL, env, has: nothing, exists: f => f === chrome || f === edge, homedir: '' })
+    const withChrome = appWindow({ platform: 'win32', url: READER_URL, profileDir: PROFILE, env, has: nothing, exists: f => f === chrome || f === edge, homedir: '' })
     assert.equal(withChrome.command, chrome)
-    assert.deepEqual(withChrome.args, [`--app=${URL}`, '--window-size=1000,1200'])
-    const withEdge = appWindow({ platform: 'win32', url: URL, env, has: nothing, exists: f => f === edge, homedir: '' })
+    assert.ok(withChrome.args.includes(`--app=${READER_URL}`))
+    assert.ok(withChrome.args.includes(`--user-data-dir=${PROFILE}`))
+    const withEdge = appWindow({ platform: 'win32', url: READER_URL, profileDir: PROFILE, env, has: nothing, exists: f => f === edge, homedir: '' })
     assert.equal(withEdge.command, edge)
   })
 
+  test('closes the reader window and switches back by process id, with PowerShell', () => {
+    const close = closeAppWindow({ platform: 'win32', profileDir: 'C:\\Users\\me\\.claude\\book-reader\\reader-profile', has: nothing })
+    assert.equal(decodeScript(close), WINDOWS_CLOSE_READER)
+    assert.equal(close.env.BOOK_READER_PROFILE, 'C:\\Users\\me\\.claude\\book-reader\\reader-profile')
+    const focus = focusApp({ platform: 'win32', has: nothing, target: { pid: 4242 } })
+    assert.equal(decodeScript(focus), WINDOWS_FOCUS)
+    assert.equal(focus.env.BOOK_READER_PID, '4242')
+    assert.equal(focusApp({ platform: 'win32', has: nothing, target: { pid: -1 } }), null)
+  })
+
   test('ignores unset folders and falls back to the default browser', () => {
-    assert.equal(appWindow({ platform: 'win32', url: URL, env: {}, has: nothing, exists: () => true, homedir: '' }), null)
-    assert.deepEqual(defaultBrowser({ platform: 'win32', url: URL }), {
+    assert.equal(appWindow({ platform: 'win32', url: READER_URL, profileDir: PROFILE, env: {}, has: nothing, exists: () => true, homedir: '' }), null)
+    assert.deepEqual(defaultBrowser({ platform: 'win32', url: READER_URL }), {
       command: 'rundll32.exe',
-      args: ['url.dll,FileProtocolHandler', URL],
+      args: ['url.dll,FileProtocolHandler', READER_URL],
     })
   })
 
@@ -151,6 +215,9 @@ describe('Windows', () => {
   for (const [name, script] of [
     ['picker', WINDOWS_PICKER],
     ['notification', WINDOWS_NOTIFICATION],
+    ['close reader', WINDOWS_CLOSE_READER],
+    ['focus', WINDOWS_FOCUS],
+    ["mod's window search", WINDOWS_HOST_PID],
   ]) {
     test(`the ${name} script is valid PowerShell`, { skip: shell ? false : 'no PowerShell here' }, () => {
       const check =
@@ -161,4 +228,17 @@ describe('Windows', () => {
       })
     })
   }
+})
+
+describe('return targets', () => {
+  test('keep only well-formed values', () => {
+    assert.deepEqual(cleanTarget({ bundleId: 'com.apple.Terminal', windowId: '12', pid: 7, extra: 'x' }), {
+      bundleId: 'com.apple.Terminal',
+      windowId: '12',
+      pid: 7,
+    })
+    assert.equal(cleanTarget({ bundleId: '../../evil', windowId: 'x', pid: '7' }), null)
+    assert.equal(cleanTarget('com.apple.Terminal'), null)
+    assert.equal(cleanTarget(null), null)
+  })
 })

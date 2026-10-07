@@ -53,6 +53,7 @@
     </div>
 
     <div class="group right">
+      <button id="toClaude" class="pill" title="Switch to the Claude Code session" hidden>↩ Claude</button>
       <div id="taskChip" class="chip" hidden></div>
       <button id="markRead" class="pill" title="Mark this page read / unread (m)">
         <span class="dot"></span><span id="readLabel">0 / 0 read</span>
@@ -133,6 +134,7 @@
       <p id="doneWhere" class="where"></p>
       <div class="dialog-actions">
         <button value="keep" id="keepReading" autofocus>Keep reading <kbd>Esc</kbd></button>
+        <button value="claude" id="switchToClaude" title="The book stays open behind Claude" hidden>Switch to Claude <kbd>S</kbd></button>
         <button value="close" id="closeBook" class="primary">Close book <kbd>C</kbd></button>
       </div>
     </form>
@@ -151,6 +153,7 @@
         <dt>⌘ + scroll, pinch</dt><dd>Zoom</dd>
         <dt>⌘F /</dt><dd>Find</dd>
         <dt>m</dt><dd>Mark page read / unread</dd>
+        <dt>Esc S C</dt><dd>When a task ends: keep reading, switch to Claude, close the book</dd>
         <dt>u</dt><dd>First unread page</dd>
         <dt>b</dt><dd>Sidebar</dd>
         <dt>t</dt><dd>Theme</dd>

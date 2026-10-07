@@ -6,7 +6,21 @@
 // variables the script reads.
 
 const PICKER_TITLE = 'Choose a book to read while Claude works'
-const WINDOW_SIZE = '--window-size=1000,1200'
+
+/**
+ * The reader runs in a browser instance of its own (its own profile folder),
+ * so the server can close it: a browser does not let a page close a window it
+ * did not open by script.
+ */
+function readerFlags(url, profileDir) {
+  return [
+    `--app=${url}`,
+    '--window-size=1000,1200',
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+  ]
+}
 
 /** Chromium browsers that take --app=<url>, by OS. */
 const MAC_APP_BROWSERS = ['Google Chrome', 'Microsoft Edge', 'Brave Browser', 'Chromium', 'Vivaldi']
@@ -108,20 +122,20 @@ export function notification({ platform, has, title, subtitle, message }) {
 }
 
 /**
- * A window of its own for the reader (a Chromium browser's --app mode), or null
- * when no such browser is installed.
+ * A window of its own for the reader (a Chromium browser's --app mode, in the
+ * reader's own profile), or null when no such browser is installed.
  *
- * @param {{ platform: string, url: string, env: Record<string, string | undefined>,
+ * @param {{ platform: string, url: string, profileDir: string,
+ *           env: Record<string, string | undefined>,
  *           has: (command: string) => boolean, exists: (file: string) => boolean,
  *           homedir: string }} host
  */
-export function appWindow({ platform, url, env, has, exists, homedir }) {
+export function appWindow({ platform, url, profileDir, env, has, exists, homedir }) {
+  const flags = readerFlags(url, profileDir)
   if (platform === 'darwin') {
     for (const name of MAC_APP_BROWSERS) {
       for (const dir of ['/Applications', `${homedir}/Applications`]) {
-        if (exists(`${dir}/${name}.app`)) {
-          return { command: '/usr/bin/open', args: ['-na', name, '--args', `--app=${url}`, WINDOW_SIZE] }
-        }
+        if (exists(`${dir}/${name}.app`)) return { command: '/usr/bin/open', args: ['-na', name, '--args', ...flags] }
       }
     }
     return null
@@ -131,14 +145,73 @@ export function appWindow({ platform, url, env, has, exists, homedir }) {
       const base = env[variable]
       if (!base) continue
       const exe = `${base.replace(/[\\/]+$/, '')}\\${rest}`
-      if (exists(exe)) return { command: exe, args: [`--app=${url}`, WINDOW_SIZE], detached: true }
+      if (exists(exe)) return { command: exe, args: flags, detached: true }
     }
     return null
   }
   for (const name of LINUX_APP_BROWSERS) {
-    if (has(name)) return { command: name, args: [`--app=${url}`, WINDOW_SIZE], detached: true }
+    if (has(name)) return { command: name, args: flags, detached: true }
   }
   return null
+}
+
+/**
+ * Closes the reader's own browser instance, found by its profile folder: no
+ * other browser window is touched.
+ *
+ * @param {{ platform: string, profileDir: string, has: (command: string) => boolean }} host
+ */
+export function closeAppWindow({ platform, profileDir, has }) {
+  if (platform === 'win32') return powershell(WINDOWS_CLOSE_READER, { BOOK_READER_PROFILE: profileDir })
+  const pkill = platform === 'darwin' ? '/usr/bin/pkill' : has('pkill') ? 'pkill' : null
+  if (!pkill) return null
+  return { command: pkill, args: ['-f', '--', `--user-data-dir=${escapeRegex(profileDir)}`] }
+}
+
+/**
+ * Brings the app that runs the Claude Code session to the front: macOS by the
+ * app's bundle id, Linux (X11) by the terminal's window id, Windows by the id
+ * of the process that owns the window.
+ *
+ * @param {{ platform: string, has: (command: string) => boolean,
+ *           target: { bundleId?: string, windowId?: string, pid?: number } | null }} host
+ */
+export function focusApp({ platform, has, target }) {
+  if (!target) return null
+  if (platform === 'darwin') {
+    return isBundleId(target.bundleId) ? { command: '/usr/bin/open', args: ['-b', target.bundleId] } : null
+  }
+  if (platform === 'win32') {
+    return Number.isInteger(target.pid) && target.pid > 0
+      ? powershell(WINDOWS_FOCUS, { BOOK_READER_PID: String(target.pid) })
+      : null
+  }
+  if (!isWindowId(target.windowId)) return null
+  if (has('xdotool')) return { command: 'xdotool', args: ['windowactivate', String(Number(target.windowId))] }
+  if (has('wmctrl')) return { command: 'wmctrl', args: ['-i', '-a', target.windowId] }
+  return null
+}
+
+/** What the server keeps of a return target: only well-formed values. */
+export function cleanTarget(target) {
+  if (!target || typeof target !== 'object') return null
+  const clean = {}
+  if (isBundleId(target.bundleId)) clean.bundleId = target.bundleId
+  if (isWindowId(target.windowId)) clean.windowId = target.windowId
+  if (Number.isInteger(target.pid) && target.pid > 0) clean.pid = target.pid
+  return Object.keys(clean).length ? clean : null
+}
+
+function isBundleId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,200}$/.test(value)
+}
+
+function isWindowId(value) {
+  return typeof value === 'string' && /^(0x[0-9a-fA-F]{1,16}|[0-9]{1,20})$/.test(value)
+}
+
+function escapeRegex(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /** The reader in the default browser. */
@@ -183,6 +256,24 @@ $icon.Visible = $true
 $icon.ShowBalloonTip(8000)
 Start-Sleep -Seconds 9
 $icon.Dispose()
+`
+
+export const WINDOWS_CLOSE_READER = `
+$ErrorActionPreference = 'SilentlyContinue'
+$marker = "--user-data-dir=$env:BOOK_READER_PROFILE"
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($marker) } |
+  ForEach-Object {
+    $process = Get-Process -Id $_.ProcessId
+    if ($process -and $process.MainWindowHandle -ne [IntPtr]::Zero) { [void]$process.CloseMainWindow() }
+  }
+`
+
+export const WINDOWS_FOCUS = `
+$ErrorActionPreference = 'Stop'
+$shell = New-Object -ComObject WScript.Shell
+if ($shell.AppActivate([int]$env:BOOK_READER_PID)) { exit 0 }
+exit 1
 `
 
 function powershell(script, env) {

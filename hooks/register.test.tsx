@@ -25,6 +25,10 @@ type Host = {
   whereNode?: string
   /** Files that exist, for the mod's fallback search on Windows. */
   files?: string[]
+  /** More environment variables of the session. */
+  env?: Record<string, string>
+  /** What the Windows window-owner search prints. */
+  windowPid?: string
 }
 
 const ok = (stdout: string, exitCode = 0) => ({
@@ -39,7 +43,8 @@ function world(on: On, reader: Reader, hostOptions: Host = {}) {
   const runs: string[][] = []
   const task = { state: 'idle', seq: 0, acked: true }
   let pluginRoot = ''
-  mock.env(on, host.os === 'windows' ? { OS: 'Windows_NT', ProgramFiles: 'C:\\Program Files' } : {})
+  const baseEnv = host.os === 'windows' ? { OS: 'Windows_NT', ProgramFiles: 'C:\\Program Files' } : {}
+  mock.env(on, { ...baseEnv, ...host.env })
   on('fs.read', ($, e) => {
     // On Windows the engine hands the path over with backslashes.
     if (!e.path.replaceAll('\\', '/').endsWith(MANIFEST)) return { deny: 'not in this test' }
@@ -63,6 +68,7 @@ function world(on: On, reader: Reader, hostOptions: Host = {}) {
     runs.push([...e.argv])
     if (e.argv[0] === '/bin/sh') return ok('/usr/local/bin/node\n')
     if (e.argv[0] === 'where.exe') return host.whereNode ? ok(host.whereNode) : ok('', 1)
+    if (e.argv[0] === 'powershell.exe') return host.windowPid ? ok(host.windowPid) : ok('', 1)
     if (e.argv.includes('--daemon')) {
       const launchedFrom = e.argv[e.argv.indexOf('--launched-from') + 1]
       Object.assign(reader, { isUp: true, version: '1.2.3', launchedFrom })
@@ -130,7 +136,7 @@ describe('book-reader', () => {
 
     await $.turn.complete({ answer: 'All done.', durationMs: 90_000, isAborted: false, turnId: 't1', reason: 'answer' })
     const ended = posted('/api/task').at(-1)
-    expect(ended?.body).toEqual({ state: 'done', durationMs: 90_000, summary: 'All done.', notify: true })
+    expect(ended?.body).toEqual({ state: 'done', returnTo: {}, durationMs: 90_000, summary: 'All done.', notify: true })
 
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ plugin: 'book-reader', surface, component: 'AbovePrompt', props: BAND_PROPS })
@@ -304,6 +310,37 @@ describe('book-reader', () => {
 
     const opened = await $.command.run({ ...RUN, command: 'book', args: '' })
     expect(opened.text).toContain('open http://127.0.0.1:47321/ yourself')
+  })
+
+  test('tells the reader which app to bring back: the macOS app of the session', async ($, on) => {
+    const { clock, posted } = world(on, { viewers: 0, hasBook: true }, { env: { __CFBundleIdentifier: 'com.googlecode.iterm2' } })
+
+    await $.turn.start({ text: 'refactor', turnId: 't7' })
+    await clock.advance(5_000)
+    expect(posted('/api/task').at(-1)?.body?.returnTo).toEqual({ bundleId: 'com.googlecode.iterm2' })
+    await $.turn.complete({ answer: 'Done.', durationMs: 9_000, isAborted: false, turnId: 't7', reason: 'answer' })
+    expect(posted('/api/task').at(-1)?.body?.returnTo).toEqual({ bundleId: 'com.googlecode.iterm2' })
+  })
+
+  test('tells the reader which window to bring back: X11 and Windows', async ($, on) => {
+    const { clock, posted, runs } = world(on, { viewers: 0, hasBook: true }, { os: 'windows', windowPid: '4242', env: { WINDOWID: '71303175' } })
+
+    await $.turn.start({ text: 'build', turnId: 't8' })
+    await clock.advance(5_000)
+    expect(posted('/api/task').at(-1)?.body?.returnTo).toEqual({ windowId: '71303175', pid: 4242 })
+    const search = runs.find(argv => argv[0] === 'powershell.exe')
+    expect(search?.includes('-EncodedCommand')).toBe(true)
+  })
+
+  test('Close book on the band only closes the reader: Claude is already in front', async ($, on) => {
+    const { posted } = world(on, { viewers: 1, hasBook: true })
+
+    await $.turn.start({ text: 'build', turnId: 't9' })
+    await $.turn.complete({ answer: 'Built.', durationMs: 40_000, isAborted: false, turnId: 't9', reason: 'answer' })
+    const ui = await $.ui.mount({ plugin: 'book-reader', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    await ui.press({ key: 'close' })
+    expect(posted('/api/close').at(-1)?.body).toEqual({ focus: false })
+    await ui.unmount()
   })
 
   test('no book chosen: the task runs without opening anything', async ($, on) => {

@@ -49,8 +49,34 @@ const live: {
   nodePath: string | null
   version: string | null
   isWindows: boolean | null
+  returnTo: ReturnTo | null
   hasWarnedNoBook: boolean
-} = { turnId: null, pendingOpen: null, poll: null, nodePath: null, version: null, isWindows: null, hasWarnedNoBook: false }
+} = {
+  turnId: null,
+  pendingOpen: null,
+  poll: null,
+  nodePath: null,
+  version: null,
+  isWindows: null,
+  returnTo: null,
+  hasWarnedNoBook: false,
+}
+
+/** Where this session runs, so the reader can bring it to the front. */
+type ReturnTo = { bundleId?: string; windowId?: string; pid?: number }
+
+// Windows: walks up from this PowerShell to the first process that owns a
+// window (Windows Terminal, the console, VS Code) and prints its id.
+const WINDOWS_HOST_PID = `
+$ErrorActionPreference = 'SilentlyContinue'
+$id = $PID
+for ($i = 0; $i -lt 12 -and $id; $i++) {
+  $process = Get-Process -Id $id
+  if ($process -and $process.MainWindowHandle -ne [IntPtr]::Zero) { [Console]::Out.Write($id); exit 0 }
+  $id = (Get-CimInstance Win32_Process -Filter "ProcessId=$id").ParentProcessId
+}
+exit 1
+`
 
 type Health = { app?: string; version?: string; launchedFrom?: string | null }
 
@@ -111,6 +137,30 @@ async function stopServer($: EngineInterface): Promise<void> {
     await api($, 'POST', '/api/shutdown')
   } catch {}
   for (let i = 0; i < 30 && (await health($)) !== null; i++) await $.clock.sleep(100)
+}
+
+// The app or window this session runs in: macOS names the app in
+// __CFBundleIdentifier (Terminal, iTerm, VS Code, the Claude app), X11 terminals
+// set WINDOWID, and on Windows the window's process is found by walking up.
+async function returnTarget($: EngineInterface): Promise<ReturnTo> {
+  if (live.returnTo) return live.returnTo
+  const target: ReturnTo = {}
+  const bundleId = await $.env.get('__CFBundleIdentifier')
+  if (bundleId) target.bundleId = bundleId
+  const windowId = await $.env.get('WINDOWID')
+  if (windowId) target.windowId = windowId
+  if (await isWindows($)) {
+    try {
+      const found = await $.process.run(
+        ['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShell(WINDOWS_HOST_PID)],
+        { timeoutMs: 15_000 },
+      )
+      const pid = Number.parseInt(found.stdout.trim(), 10)
+      if (found.exitCode === 0 && pid > 0) target.pid = pid
+    } catch {}
+  }
+  live.returnTo = target
+  return target
 }
 
 async function isWindows($: EngineInterface): Promise<boolean> {
@@ -230,7 +280,7 @@ async function openForTurn($: EngineInterface, id: string): Promise<void> {
       }
       return
     }
-    await api($, 'POST', '/api/task', { state: 'running' })
+    await api($, 'POST', '/api/task', { state: 'running', returnTo: await returnTarget($) })
     await show($)
     if (live.turnId === id) $.ui.status(`📖 ${state.current.title} · ${where(state.current)}`)
   } catch (error) {
@@ -244,6 +294,7 @@ async function finishTurn($: EngineInterface, e: TurnCompleteInput): Promise<voi
   const isReading = state.viewers > 0 && state.current !== null
   await api($, 'POST', '/api/task', {
     state: e.reason === 'answer' ? 'done' : e.reason === 'aborted' ? 'aborted' : 'error',
+    returnTo: await returnTarget($),
     durationMs: e.durationMs,
     summary: e.answer.slice(0, 600),
     notify: isReading && cfg.notify && e.reason !== 'aborted',
@@ -299,7 +350,8 @@ async function closeBook($: EngineInterface): Promise<void> {
   await clearBand($)
   $.ui.status(undefined)
   try {
-    await api($, 'POST', '/api/close')
+    // Claude is already in front here: only the reader closes.
+    await api($, 'POST', '/api/close', { focus: false })
   } catch {}
 }
 
@@ -427,6 +479,25 @@ async function resolvePath($: EngineInterface, raw: string): Promise<string> {
   return `${cwd}${separator}${path.replace(/^\.[\\/]/, '')}`
 }
 
+/** PowerShell's -EncodedCommand: the script as UTF-16LE, in base64. */
+function encodePowerShell(script: string): string {
+  const bytes: number[] = []
+  for (let i = 0; i < script.length; i++) {
+    const code = script.charCodeAt(i)
+    bytes.push(code & 0xff, code >> 8)
+  }
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const [a = 0, b = 0, c = 0] = [bytes[i], bytes[i + 1], bytes[i + 2]]
+    const n = (a << 16) | (b << 8) | c
+    out += alphabet[(n >> 18) & 63]! + alphabet[(n >> 12) & 63]!
+    out += i + 1 < bytes.length ? alphabet[(n >> 6) & 63]! : '='
+    out += i + 2 < bytes.length ? alphabet[n & 63]! : '='
+  }
+  return out
+}
+
 function isOlderVersion(running: string | undefined, mine: string): boolean {
   const parts = (version: string) => version.split(/[.+-]/).slice(0, 3).map(part => Number.parseInt(part, 10) || 0)
   if (!running) return true
@@ -480,7 +551,7 @@ export const register: Register = (on, options) => {
     await clearBand($)
     if (await isUp($)) {
       // A reader window may already be open: show it that a task runs.
-      await api($, 'POST', '/api/task', { state: 'running' }).catch(() => {})
+      await api($, 'POST', '/api/task', { state: 'running', returnTo: await returnTarget($) }).catch(() => {})
     }
     if (await isAutoOpen($)) {
       const id = e.turnId

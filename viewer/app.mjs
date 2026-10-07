@@ -600,6 +600,7 @@ function cycleTheme() {
 
 function renderTaskChip() {
   const chip = el('taskChip')
+  el('toClaude').hidden = !task?.canReturn
   if (!task || task.state === 'idle') {
     chip.hidden = true
     return
@@ -648,6 +649,8 @@ function showDone(t) {
   el('doneWhere').textContent = pdfDoc
     ? `You are on page ${currentPage()} of ${numPages()} · ${readSet.size} pages read. Your place is saved either way.`
     : ''
+  el('switchToClaude').hidden = !t.canReturn
+  el('closeBook').title = t.canReturn ? 'Closes the book and takes you back to Claude' : 'Closes the book; your place is kept'
   if (!doneDialog.open) doneDialog.showModal()
   el('keepReading').focus()
   document.title = `✓ Task finished — ${book?.title ?? 'Book Reader'}`
@@ -663,14 +666,28 @@ doneDialog.addEventListener('close', () => {
     closeBook(true)
     return
   }
+  if (choice === 'claude') {
+    switchToClaude()
+    return
+  }
   api('POST', '/api/task', { state: 'ack' }).catch(() => {})
   focusReader()
 })
 
+/** Brings the Claude Code session to the front; the book stays open behind it. */
+async function switchToClaude() {
+  await flushProgress()
+  const result = await api('POST', '/api/focus').catch(() => ({ focused: false }))
+  if (!result.focused) toast('Could not switch to Claude: use your app switcher', 4000)
+}
+el('toClaude').onclick = switchToClaude
+
 async function closeBook(fromHere) {
   if (doneDialog.open) doneDialog.close('silent')
   await flushProgress()
-  if (fromHere) await api('POST', '/api/close').catch(() => {})
+  // The server switches to Claude, then closes this window: a page may not
+  // close a window the browser opened.
+  if (fromHere) await api('POST', '/api/close', { focus: true }).catch(() => {})
   window.close()
   // A window the browser will not let a script close: say the place is kept.
   setTimeout(() => {
@@ -855,6 +872,9 @@ document.addEventListener('keydown', e => {
     if (!mod && (key === 'c' || key === 'C')) {
       e.preventDefault()
       doneDialog.close('close')
+    } else if (!mod && (key === 's' || key === 'S') && task?.canReturn) {
+      e.preventDefault()
+      doneDialog.close('claude')
     }
     return
   }

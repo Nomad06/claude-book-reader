@@ -324,6 +324,16 @@ describe('task events', () => {
     assert.equal((await request('GET', '/api/state')).json.viewers, 0)
   })
 
+  test('without a known app (or under --no-launch) there is no switching back', async () => {
+    const running = await request('POST', '/api/task', { body: { state: 'running', returnTo: { bundleId: 'com.apple.Terminal' } } })
+    assert.equal(running.json.task.canReturn, false)
+    const focus = await request('POST', '/api/focus')
+    assert.deepEqual(focus.json, { focused: false, reason: 'off' })
+    assert.equal(focus.json.focused, false)
+    const close = await request('POST', '/api/close', { body: { focus: true } })
+    assert.equal(close.json.focused, false)
+  })
+
   test('refuses an unknown task state', async () => {
     assert.equal((await request('POST', '/api/task', { body: { state: 'party' } })).status, 400)
   })
