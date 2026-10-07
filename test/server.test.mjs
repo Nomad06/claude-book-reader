@@ -445,3 +445,22 @@ describe('dock', () => {
     assert.equal(book.location, null)
   })
 })
+
+describe('untrusted titles', () => {
+  test('control characters (terminal escapes) never reach a stored title', async () => {
+    const file = await writePdf('escapes.pdf')
+    const { json } = await request('POST', '/api/books', { body: { path: file } })
+    const id = json.book.id
+    await request('POST', `/api/books/${id}/progress`, { body: { pages: 5, title: 'Evil\u001b[2J\u001b]0;pwned\u0007 Book\u009b' } })
+    await request('POST', `/api/books/${id}/outline`, { body: { outline: [{ title: '\u001b[31mRed\u001b[0m\r\nChapter', page: 1, level: 0 }] } })
+    const book = (await request('GET', `/api/books/${id}`)).json
+    assert.equal(book.title, 'Evil[2J]0;pwned Book')
+    assert.equal(book.outline[0].title, '[31mRed[0m Chapter')
+  })
+
+  test('a file name with control characters gives a plain title', async () => {
+    const file = await writePdf('esc\u001b[2Jname.pdf')
+    const { json } = await request('POST', '/api/books', { body: { path: file } })
+    assert.equal(json.book.title, 'esc[2Jname')
+  })
+})

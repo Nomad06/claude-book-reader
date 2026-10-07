@@ -196,7 +196,7 @@ async function addBook(rawPath) {
     : {
         id,
         path: real,
-        title: path.basename(real).replace(/\.pdf$/i, ''),
+        title: plainText(path.basename(real).replace(/\.pdf$/i, '')) || 'book',
         pages: null,
         page: 1,
         location: null,
@@ -492,13 +492,24 @@ function mergeProgress(book, body) {
   if (typeof body.location === 'string' && body.location.length < 200) book.location = body.location
   if (Number.isInteger(body.page) && body.page > 0) book.page = body.page
   if (Number.isInteger(body.pages) && body.pages > 0) book.pages = body.pages
-  if (typeof body.title === 'string' && body.title.trim() && body.title.length < 300) book.title = body.title.trim()
+  if (typeof body.title === 'string' && plainText(body.title) && body.title.length < 300) book.title = plainText(body.title)
   const read = new Set(book.read ?? [])
   for (const p of Array.isArray(body.read) ? body.read : []) if (Number.isInteger(p) && p > 0) read.add(p)
   for (const p of Array.isArray(body.unread) ? body.unread : []) read.delete(p)
   book.read = [...read].sort((a, b) => a - b)
   book.updatedAt = Date.now()
   scheduleSave()
+}
+
+// Titles come from PDFs (untrusted) and end up drawn in a terminal: line breaks
+// become spaces and every other control character (ESC, BEL, C1) is dropped, so
+// no title carries escape sequences.
+function plainText(text) {
+  return text
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .replace(/ {2,}/g, ' ')
+    .trim()
 }
 
 // The contents the reader found in the PDF, for the dock in Claude Code.
@@ -517,7 +528,7 @@ function cleanOutline(body, pages) {
       entry.level >= 0 &&
       entry.level <= 9
     if (!isEntry) throw httpError(400, 'each outline entry is { title, page, level }')
-    return { title: entry.title.trim().slice(0, 200) || '(untitled)', page: entry.page, level: entry.level }
+    return { title: plainText(entry.title).slice(0, 200) || '(untitled)', page: entry.page, level: entry.level }
   })
 }
 
