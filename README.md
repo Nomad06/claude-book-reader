@@ -28,6 +28,12 @@ the reader tells you and asks whether to close the book or keep reading.
   took and the start of Claude's answer, a desktop notification, and a band above
   Claude's prompt, each offering **Close book** or **Keep reading**. Your place
   is saved either way.
+- **A Reading Dock in the terminal.** In a wide fullscreen terminal, a pane
+  beside the transcript shows the book's progress, a strip of the pages you
+  have read, the chapters with ticks, and the running task with a timer. Press
+  a chapter to jump there, `l` for your library, `o` to raise the reader. When
+  the task ends it says how long it took and how many pages you read meanwhile.
+  `/book dock` folds it to the status line and back.
 - **Local and offline.** PDF.js is bundled, the reader server listens on
   `127.0.0.1` only, and nothing is sent anywhere.
 
@@ -131,6 +137,7 @@ Pick a book once, then just work:
 | `/book list` | Your books with their progress |
 | `/book <n>` | Switch to book number *n* of the list |
 | `/book close` | Close the reader window (your place is kept) |
+| `/book dock` | Show the Reading Dock beside the transcript, or fold it to the status line |
 | `/book auto on` / `off` | Open the book by itself while a task runs, or not |
 | `/book delay <seconds>` | How long a task must run before the book opens (`0`: at once) |
 | `/book status` | What is set up |

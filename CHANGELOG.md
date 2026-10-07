@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Reading Dock: a pane beside the transcript (fullscreen terminal, 144+ columns when it opens by itself) with the book's progress, a read-pages strip, chapters with ticks and the running task. It replaces the "task finished" band while it is shown. Press a chapter to jump there; `l` opens the library, `o` the reader. `/book dock` folds it to a status-line badge and back; a folded dock, or one closed by hand, stays closed through tasks until `/book` or `/book dock`.
+- The reader reports each book's contents to the reader server, and `/api/show` takes a page.
+- Book and chapter titles lose control characters (no terminal escape sequences from a PDF), and page counts over 100000 are refused.
+
 ## 0.1.1
 
 - Two Claude Code sessions with different installs of the mod (or one session started before an update) no longer take turns restarting the shared reader server, which could also open a second reader window. Only a server of an older version is replaced now.

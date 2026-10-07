@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, TurnCompleteInput } from 'claude-code'
 
 import type { BookDetail, BookSummary, DockSnapshot, DoneBand, OutlineEntry, ReaderState } from '../types'
-import { newTask, withBaseline } from './dock-logic.ts'
+import { badge, newTask, withBaseline } from './dock-logic.ts'
 import { registerDock } from './dock.tsx'
 
 // The reader itself is a local web page (pdf.js) served by server/server.mjs on
@@ -24,6 +24,7 @@ const HELP = [
   '/book <file.pdf>      read that PDF (absolute, ~/ or relative to this project)',
   '/book list            your books with progress; /book <n> switches to one',
   '/book close           close the reader window (your place is kept)',
+  '/book dock            show the Reading Dock beside the transcript, or fold it to the status line',
   '/book auto on|off     open the book by itself while a task runs',
   '/book delay <sec>     how long a task must run before the book opens',
   '/book status          what is set up',
@@ -62,6 +63,7 @@ const live: {
   hasWarnedNoBook: boolean
   dockPoll: Timer | null
   dockDismissed: boolean
+  isFolded: boolean
 } = {
   turnId: null,
   pendingOpen: null,
@@ -73,6 +75,7 @@ const live: {
   hasWarnedNoBook: false,
   dockPoll: null,
   dockDismissed: false,
+  isFolded: false,
 }
 
 /** Where this session runs, so the reader can bring it to the front. */
@@ -341,6 +344,29 @@ function stopDockPoll(): void {
   live.dockPoll = null
 }
 
+// The status line between tasks: the badge while the dock is folded, else nothing.
+async function restStatus($: EngineInterface): Promise<void> {
+  const current = live.isFolded ? (await read($, dock))?.current : null
+  $.ui.status(current ? badge(current) : undefined)
+}
+
+async function closeDock($: EngineInterface): Promise<void> {
+  live.isFolded = true
+  stopDockPoll()
+  await $.ui.close({ id: DOCK })
+  await refreshDock($)
+  await restStatus($)
+}
+
+/** The dock asked for by the person: placed at any width, and it may open by itself again. */
+async function openDockAsked($: EngineInterface): Promise<void> {
+  live.isFolded = false
+  live.dockDismissed = false
+  await ensureServer($)
+  await openDock($)
+  if (live.turnId === null) await restStatus($)
+}
+
 // Presses on the dock that reach the reader server; dock.tsx draws the Buttons.
 async function dockPress($: EngineInterface, element: string): Promise<void> {
   if (element === 'dock-close' || element === 'dock-keep') {
@@ -385,7 +411,7 @@ async function openForTurn($: EngineInterface, id: string): Promise<void> {
     await show($)
     if (live.turnId !== id) return
     $.ui.status(`📖 ${state.current.title} · ${where(state.current)}`)
-    if (!live.dockDismissed) await openDock($)
+    if (!live.dockDismissed && !live.isFolded) await openDock($)
   } catch (error) {
     $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 })
   }
@@ -458,7 +484,7 @@ async function clearBand($: EngineInterface): Promise<void> {
 
 async function closeBook($: EngineInterface): Promise<void> {
   await clearBand($)
-  $.ui.status(undefined)
+  await restStatus($)
   try {
     // Claude is already in front here: only the reader closes.
     await api($, 'POST', '/api/close', { focus: false })
@@ -527,6 +553,20 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
 
   await ensureServer($)
 
+  if (verb === 'dock') {
+    const isOpen = await hasDock($)
+    // Never await our own pane in a command: open or fold it once the answer is out.
+    void (async () => {
+      try {
+        if (isOpen) await closeDock($)
+        else await openDockAsked($)
+      } catch (error) {
+        $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 })
+      }
+    })()
+    return isOpen ? '📖 Reading Dock folded: your place stays in the status line.' : '📖 Reading Dock opened.'
+  }
+
   if (verb === 'list' || verb === 'ls') {
     const state = await api<ReaderState>($, 'GET', '/api/state')
     if (state.books.length === 0) return 'No books yet: /book choose'
@@ -560,6 +600,7 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
     const state = await api<ReaderState>($, 'GET', '/api/state')
     if (!state.current) return runBook($, 'choose')
     const shown = await showBook($)
+    void openDockAsked($).catch(error => $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' }))
     return `📖 ${state.current.title} · ${where(shown ?? state.current)}`
   }
 
@@ -642,7 +683,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'book',
       description: 'Book reader: pick a PDF, open or close it, list books, auto-open on/off',
-      argumentHint: '[choose | <file.pdf> | list | <n> | close | auto on|off | delay <s> | status | restart]',
+      argumentHint: '[choose | <file.pdf> | list | <n> | close | dock | auto on|off | delay <s> | status | restart]',
       immediate: true,
     })
     return next(e)
@@ -686,7 +727,7 @@ export const register: Register = (on, options) => {
     live.pendingOpen?.cancel()
     live.pendingOpen = null
     live.turnId = null
-    $.ui.status(undefined)
+    await restStatus($)
     await finishTurn($, e).catch(error => $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' }))
     return result
   })

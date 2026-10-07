@@ -176,3 +176,73 @@ describe('reading dock face', () => {
     await ui.unmount()
   })
 })
+
+const RUN_BOOK = { origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 }, command: 'book' } as const
+
+describe('/book dock', () => {
+  // `$.command.run` answers before the command's unawaited open or fold settles.
+  const settle = () => new Promise(resolve => setTimeout(resolve, 50))
+
+  test('opens the dock, then folds it to a badge, then opens it again', async ($, on) => {
+    const reader = { viewers: 0, hasBook: true }
+    const { opens, panes, statuses } = world(on, reader, { placesPanes: true })
+
+    const opened = await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    await settle()
+    expect(opened.text).toMatch(/Reading Dock opened/)
+    expect(opens.at(-1)).toEqual({ id: 'book-dock', columns: 72 })
+    expect(panes.map(pane => pane.id)).toEqual(['book-dock'])
+
+    const folded = await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    await settle()
+    expect(folded.text).toMatch(/folded/)
+    expect(panes).toHaveLength(0)
+    expect(statuses.at(-1)).toBe('📖 p.42/300 · 12%')
+
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    expect(panes.map(pane => pane.id)).toEqual(['book-dock'])
+    expect(statuses.at(-1)).toBe(undefined)
+  })
+
+  test('while folded, the badge comes back after a task', async ($, on) => {
+    const reader = { viewers: 0, hasBook: true }
+    const { clock, statuses } = world(on, reader, { placesPanes: true })
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(1_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect(statuses.at(-1)).toBe('📖 p.42/300 · 12%')
+  })
+
+  test('/book with no argument opens the dock as well as the reader', async ($, on) => {
+    const { opens, posted } = world(on, { viewers: 0, hasBook: true }, { placesPanes: true })
+    await $.command.run({ ...RUN_BOOK, args: '' })
+    await settle()
+    expect(posted('/api/show').length).toBeGreaterThan(0)
+    expect(opens.at(-1)?.id).toBe('book-dock')
+  })
+
+  test('a folded dock stays folded through tasks until /book dock', async ($, on) => {
+    const { clock, opens } = world(on, { viewers: 0, hasBook: true }, { placesPanes: true })
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    const before = opens.length
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    expect(opens.length).toBe(before)
+    await $.turn.complete({ answer: 'ok', durationMs: 5_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    await $.turn.start({ text: 'build', turnId: 't2' })
+    await clock.advance(5_000)
+    expect(opens.length).toBe(before + 2)
+  })
+})
