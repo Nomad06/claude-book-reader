@@ -319,9 +319,11 @@ async function openDock($: EngineInterface): Promise<void> {
 }
 
 // While the dock is open: every 2 s, fetch what it shows (when it is drawn) and
-// blink its ● READING. Stops once no task runs and no reader window is open.
+// blink its ● READING. Stops after three ticks with no task and no reader window
+// (a reader just launched takes a moment to connect).
 function startDockPoll($: EngineInterface): void {
   if (live.dockPoll) return
+  let idleTicks = 0
   live.dockPoll = $.clock.every(2000, async () => {
     const task = await read($, dockTask)
     const isWorking = task !== null && task.endedAt === null
@@ -331,7 +333,8 @@ function startDockPoll($: EngineInterface): void {
     }
     try {
       const snapshot = await refreshDock($)
-      if (!isWorking && snapshot.viewers === 0) return stopDockPoll()
+      idleTicks = !isWorking && snapshot.viewers === 0 ? idleTicks + 1 : 0
+      if (idleTicks >= 3) return stopDockPoll()
       await update($, blink, on => !on)
     } catch (error) {
       $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' })
@@ -375,24 +378,24 @@ async function dockPress($: EngineInterface, element: string): Promise<void> {
     await update($, dockTask, () => null)
     return
   }
+  const chapter = /^ch-(\d+)-\d+$/.exec(element)
+  const book = /^book-([0-9a-f]{12})$/.exec(element)
   if (element === 'dock-open') {
     await showBook($)
-    return
-  }
-  const chapter = /^ch-(\d+)-\d+$/.exec(element)
-  if (chapter) {
+  } else if (chapter) {
     await ensureServer($)
     await show($, Number(chapter[1]))
-    return
-  }
-  const book = /^book-([0-9a-f]{12})$/.exec(element)
-  if (book) {
+  } else if (book) {
     await ensureServer($)
     await api($, 'POST', `/api/books/${book[1]}/select`)
     await update($, dockView, () => 'main')
     await show($)
     await refreshDock($)
+  } else {
+    return
   }
+  // A reader opened from the dock: follow it again.
+  startDockPoll($)
 }
 
 async function openForTurn($: EngineInterface, id: string): Promise<void> {
@@ -464,7 +467,8 @@ function watchReader($: EngineInterface): void {
       live.poll?.cancel()
       live.poll = null
       await update($, band, () => null)
-      await update($, dockTask, () => null)
+      // Only a finished task: a new one may have started while this tick awaited.
+      await update($, dockTask, task => (task && task.endedAt === null ? task : null))
       return
     }
     const book = state.current
@@ -480,6 +484,8 @@ async function clearBand($: EngineInterface): Promise<void> {
   live.poll?.cancel()
   live.poll = null
   await update($, band, () => null)
+  // The dock's done view answers the same question as the band.
+  await update($, dockTask, () => null)
 }
 
 async function closeBook($: EngineInterface): Promise<void> {

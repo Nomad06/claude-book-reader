@@ -246,3 +246,49 @@ describe('/book dock', () => {
     expect(opens.length).toBe(before + 2)
   })
 })
+
+describe('final review fixes', () => {
+  const settle = () => new Promise(resolve => setTimeout(resolve, 50))
+
+  test('the dock keeps following a reader that connects after the first tick', async ($, on) => {
+    const reader = { viewers: 0, hasBook: true }
+    const { clock } = world(on, reader, { placesPanes: true })
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    reader.viewers = 0
+    await clock.advance(2_000)
+    Object.assign(reader, { viewers: 1, book: { page: 50, readCount: 40 } })
+    await clock.advance(2_000)
+    const ui = await mountDock($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /p\. 50 \/ 300/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('opening the reader from the dock starts following it again', async ($, on) => {
+    const reader = { viewers: 0, hasBook: true }
+    const { clock } = world(on, reader, { placesPanes: true })
+    await $.command.run({ ...RUN_BOOK, args: 'dock' })
+    await settle()
+    reader.viewers = 0
+    await clock.advance(20_000)
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'dock-open' })
+    Object.assign(reader, { book: { page: 60, readCount: 45 } })
+    await clock.advance(2_000)
+    expect(await ui.find({ type: 'Text', text: /p\. 60 \/ 300/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test("the band's Close book also clears the dock's done view", async ($, on) => {
+    const { clock } = world(on, { viewers: 0, hasBook: true }, { placesPanes: false })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 9_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    const band = await $.ui.mount({ plugin: 'book-reader', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    await band.press({ key: 'close' })
+    await band.unmount()
+    const ui = await mountDock($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /C O M P L E T E/ })).toBeUndefined()
+    await ui.unmount()
+  })
+})
