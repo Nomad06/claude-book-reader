@@ -404,6 +404,7 @@ async function renderOutline() {
   if (doc !== pdfDoc) return
   if (!outline?.length) {
     box.innerHTML = '<p class="muted">No table of contents in this book.</p>'
+    reportOutline([])
     return
   }
   const entries = [] // in reading order: { a, level, page }
@@ -434,6 +435,25 @@ async function renderOutline() {
   if (doc !== pdfDoc) return
   outlinePages = entries.filter(entry => entry.page)
   updateOutlineRead()
+  reportOutline(outlinePages)
+}
+
+// Tells the server the contents, so the dock in Claude Code can list chapters.
+// Sent once per book: skipped when the server already has the same list.
+function reportOutline(entries) {
+  if (!book) return
+  const outline = entries.slice(0, 2000).map(entry => ({
+    title: (entry.a.title || entry.a.textContent || '').trim().slice(0, 200) || '(untitled)',
+    page: entry.page,
+    level: Math.min(entry.level, 9),
+  }))
+  if (JSON.stringify(outline) === JSON.stringify(book.outline ?? null)) return
+  const id = book.id
+  api('POST', `/api/books/${id}/outline`, { outline })
+    .then(() => {
+      if (book?.id === id) book.outline = outline
+    })
+    .catch(() => {})
 }
 
 async function resolvePage(doc, dest) {
@@ -776,6 +796,12 @@ async function handle(message) {
       break
     case 'close':
       closeBook(false)
+      break
+    case 'goto':
+      if (message.id === book?.id) {
+        el('closedNote').hidden = true
+        goToPage(message.page)
+      }
       break
     case 'attention':
       el('closedNote').hidden = true
