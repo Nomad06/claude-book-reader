@@ -1,5 +1,12 @@
 import { mock } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
 import type { On } from 'claude-code'
+
+import type { BookSummary, OutlineEntry } from '../types'
+
+/** The `$` and `on` a test body receives. */
+export type TestDollar = Parameters<TestBody>[0]
+export type TestOn = Parameters<TestBody>[1]
 
 type Call = { method: string; path: string; body: Record<string, unknown> | undefined }
 
@@ -15,6 +22,11 @@ export type Reader = {
   launchedFrom?: string
   /** Linux with no xdg-open and no Chromium browser. */
   hasNoBrowser?: boolean
+  /** The current book's fields that differ from BOOK (reading moves page and readCount). */
+  book?: Partial<BookSummary>
+  /** The current book's read pages and contents, as GET /api/books/:id answers. */
+  read?: number[]
+  outline?: OutlineEntry[] | null
 }
 
 export type Host = {
@@ -29,6 +41,8 @@ export type Host = {
   env?: Record<string, string>
   /** What the Windows window-owner search prints. */
   windowPid?: string
+  /** Whether a pane the mod opens is drawn (a fullscreen terminal wide enough). */
+  placesPanes?: boolean
 }
 
 const ok = (stdout: string, exitCode = 0) => ({
@@ -57,7 +71,27 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   mock.store(on)
   const clock = mock.clock(on, { now: 1_000 })
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
+  const statuses: (string | undefined)[] = []
+  on('ui.status', ($, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  const panes: { id: string; isPlaced: boolean }[] = []
+  const opens: { id: string; columns?: number }[] = []
+  on('ui.open', ($, e) => {
+    opens.push({ id: e.id, columns: e.columns })
+    const isPlaced = host.placesPanes === true
+    if (!panes.some(pane => pane.id === e.id)) panes.push({ id: e.id, isPlaced })
+    return { value: isPlaced ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'narrow' } }
+  })
+  on('ui.panes', () => ({
+    value: panes.map(pane => ({ ...pane, title: 'Book Reader', isShown: true, isFocused: false })),
+  }))
+  on('ui.close', ($, e) => {
+    const at = panes.findIndex(pane => pane.id === e.id)
+    if (at >= 0) panes.splice(at, 1)
+    return { value: undefined }
+  })
   on('ui.log', () => ({ value: undefined }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.render', ($, e) => $.ui.resolve(e).Box({}))
@@ -88,8 +122,12 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
       case '/api/shutdown':
         reader.isUp = false
         return json({ ok: true })
-      case '/api/state':
-        return json({ current: reader.hasBook ? BOOK : null, books: [BOOK], viewers: reader.viewers, task })
+      case '/api/state': {
+        const current = { ...BOOK, ...reader.book }
+        return json({ current: reader.hasBook ? current : null, books: [current], viewers: reader.viewers, task })
+      }
+      case `/api/books/${BOOK.id}`:
+        return json({ ...BOOK, ...reader.book, read: reader.read ?? [], outline: reader.outline ?? null })
       case '/api/books':
         return json({ book: { ...BOOK, path: body?.path } })
       case '/api/show':
@@ -109,7 +147,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   })
   const posted = (path: string) => calls.filter(c => c.method === 'POST' && c.path === path)
   const daemon = () => runs.find(argv => argv.includes('--daemon'))
-  return { calls, runs, clock, posted, daemon, root: () => pluginRoot }
+  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses }
 }
 
 export const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const
@@ -121,4 +159,24 @@ export const BAND_PROPS = {
   bodyColumns: 100,
   scroll: { offset: 0, bodyRows: 6 },
   view: {},
+}
+
+export const PANE_PROPS = {
+  title: 'Book Reader',
+  isFocused: true,
+  bodyColumns: 72,
+  placement: 'dock',
+  scroll: { offset: 0, bodyRows: 40 },
+  view: {},
+} as const
+
+/** Draws the Reading Dock through the mod, `columns` wide. */
+export function mountDock($: TestDollar, surface: 'terminal' | 'desktop', columns = 72) {
+  return $.ui.mount({
+    plugin: 'book-reader',
+    surface,
+    component: 'Pane',
+    requestId: 'book-dock',
+    props: { ...PANE_PROPS, bodyColumns: columns },
+  })
 }

@@ -1,13 +1,21 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { BookSummary, DoneBand, ReaderState } from '../types'
+import type { BookDetail, BookSummary, DockSnapshot, DoneBand, OutlineEntry, ReaderState } from '../types'
+import { newTask, withBaseline } from './dock-logic.ts'
+import { registerDock } from './dock.tsx'
 
 // The reader itself is a local web page (pdf.js) served by server/server.mjs on
 // 127.0.0.1. This module starts that server on demand, opens the book when a
 // task has run for a while, and tells the reader when the task ends.
 
 const band = atom({ plugin: 'book-reader', key: 'band' } as const, null)
+
+// The Reading Dock's state: dock.tsx draws from it, this module keeps it current.
+const DOCK = 'book-dock'
+const dock = atom({ plugin: 'book-reader', key: 'dock' } as const, null)
+const dockTask = atom({ plugin: 'book-reader', key: 'dockTask' } as const, null)
+const blink = atom({ plugin: 'book-reader', key: 'blink' } as const, false)
 
 const HELP = [
   '/book                 open the current book now (or pick one)',
@@ -51,6 +59,8 @@ const live: {
   isWindows: boolean | null
   returnTo: ReturnTo | null
   hasWarnedNoBook: boolean
+  dockPoll: Timer | null
+  dockDismissed: boolean
 } = {
   turnId: null,
   pendingOpen: null,
@@ -60,6 +70,8 @@ const live: {
   isWindows: null,
   returnTo: null,
   hasWarnedNoBook: false,
+  dockPoll: null,
+  dockDismissed: false,
 }
 
 /** Where this session runs, so the reader can bring it to the front. */
@@ -268,6 +280,74 @@ async function showBook($: EngineInterface): Promise<BookSummary | null> {
   return (await readerState($))?.current ?? null
 }
 
+// ------------------------------------------------------------ the dock
+
+async function refreshDock($: EngineInterface): Promise<DockSnapshot> {
+  const state = await readerState($)
+  let current: BookDetail | null = null
+  if (state?.current) {
+    const detail = await api<{ read?: number[]; outline?: OutlineEntry[] | null }>($, 'GET', `/api/books/${state.current.id}`).catch(
+      () => ({}) as { read?: number[]; outline?: OutlineEntry[] | null },
+    )
+    current = { ...state.current, read: detail.read ?? [], outline: detail.outline ?? null }
+  }
+  const snapshot: DockSnapshot = state
+    ? { isServerUp: true, current, books: state.books, viewers: state.viewers }
+    : { isServerUp: false, current: null, books: [], viewers: 0 }
+  await update($, dock, () => snapshot)
+  await update($, dockTask, task => withBaseline(task, snapshot))
+  return snapshot
+}
+
+async function hasDock($: EngineInterface): Promise<boolean> {
+  return (await $.ui.panes()).some(pane => pane.id === DOCK)
+}
+
+async function isDockPlaced($: EngineInterface): Promise<boolean> {
+  return (await $.ui.panes()).some(pane => pane.id === DOCK && pane.isPlaced)
+}
+
+async function openDock($: EngineInterface): Promise<void> {
+  await $.ui.open({ id: DOCK, title: 'Book Reader', columns: 72 })
+  await refreshDock($)
+  startDockPoll($)
+}
+
+// While the dock is open: every 2 s, fetch what it shows (when it is drawn) and
+// blink its ● READING. Stops once no task runs and no reader window is open.
+function startDockPoll($: EngineInterface): void {
+  if (live.dockPoll) return
+  live.dockPoll = $.clock.every(2000, async () => {
+    const task = await read($, dockTask)
+    const isWorking = task !== null && task.endedAt === null
+    if (!(await isDockPlaced($))) {
+      if (!isWorking || !(await hasDock($))) stopDockPoll()
+      return
+    }
+    try {
+      const snapshot = await refreshDock($)
+      if (!isWorking && snapshot.viewers === 0) return stopDockPoll()
+      await update($, blink, on => !on)
+    } catch (error) {
+      $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' })
+    }
+  })
+}
+
+function stopDockPoll(): void {
+  live.dockPoll?.cancel()
+  live.dockPoll = null
+}
+
+// Presses on the dock that reach the reader server; dock.tsx draws the Buttons.
+async function dockPress($: EngineInterface, element: string): Promise<void> {
+  if (element === 'dock-close' || element === 'dock-keep') {
+    if (element === 'dock-close') await closeBook($)
+    else await keepReading($)
+    await update($, dockTask, () => null)
+  }
+}
+
 async function openForTurn($: EngineInterface, id: string): Promise<void> {
   if (live.turnId !== id) return
   try {
@@ -282,7 +362,9 @@ async function openForTurn($: EngineInterface, id: string): Promise<void> {
     }
     await api($, 'POST', '/api/task', { state: 'running', returnTo: await returnTarget($) })
     await show($)
-    if (live.turnId === id) $.ui.status(`📖 ${state.current.title} · ${where(state.current)}`)
+    if (live.turnId !== id) return
+    $.ui.status(`📖 ${state.current.title} · ${where(state.current)}`)
+    if (!live.dockDismissed) await openDock($)
   } catch (error) {
     $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 })
   }
@@ -290,8 +372,14 @@ async function openForTurn($: EngineInterface, id: string): Promise<void> {
 
 async function finishTurn($: EngineInterface, e: TurnCompleteInput): Promise<void> {
   const state = await readerState($)
+  const isReading = state !== null && state.viewers > 0 && state.current !== null
+  // The dock shows the done view only to someone reading through the task.
+  const endedAt = await $.clock.now()
+  await update($, dockTask, task =>
+    task && isReading ? { ...task, endedAt, durationMs: e.durationMs, reason: e.reason } : null,
+  )
   if (!state) return
-  const isReading = state.viewers > 0 && state.current !== null
+  if (await isDockPlaced($)) await refreshDock($)
   await api($, 'POST', '/api/task', {
     state: e.reason === 'answer' ? 'done' : e.reason === 'aborted' ? 'aborted' : 'error',
     returnTo: await returnTarget($),
@@ -329,6 +417,7 @@ function watchReader($: EngineInterface): void {
       live.poll?.cancel()
       live.poll = null
       await update($, band, () => null)
+      await update($, dockTask, () => null)
       return
     }
     const book = state.current
@@ -525,6 +614,9 @@ export const register: Register = (on, options) => {
     nodePath: String(options.nodePath ?? '').trim(),
   })
 
+  // The dock's drawing lives in dock.tsx; its lifecycle stays here.
+  registerDock(on)
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'book',
@@ -544,12 +636,17 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    const startedAt = await $.clock.now()
     const started = await next(e)
     live.turnId = e.turnId
     live.pendingOpen?.cancel()
     live.pendingOpen = null
     await clearBand($)
-    if (await isUp($)) {
+    const isServerUp = await isUp($)
+    const snapshot = isServerUp ? await refreshDock($).catch(() => null) : null
+    await update($, dockTask, () => newTask(e.text, startedAt, snapshot))
+    if (await hasDock($)) startDockPoll($)
+    if (isServerUp) {
       // A reader window may already be open: show it that a task runs.
       await api($, 'POST', '/api/task', { state: 'running', returnTo: await returnTarget($) }).catch(() => {})
     }
@@ -576,6 +673,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const done = await read($, band)
     if (done === null || e.props.hasSurvey || e.props.isWorking) return next(e)
+    // The dock shows the same choice while it is drawn.
+    if (await isDockPlaced($)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const headline =
       done.reason === 'answer' ? '✓ Task finished' : done.reason === 'aborted' ? '■ Task stopped' : '⚠ Task ended with an error'
@@ -593,6 +692,21 @@ export const register: Register = (on, options) => {
         <Button key="keep" label="Keep reading" hotkey="k" onPress={() => keepReading($)} />
       </Box>
     )
+  })
+
+  on('ui.press', { requestId: DOCK }, async ($, e, next) => {
+    const result = await next(e)
+    await dockPress($, e.element).catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
+    return result
+  })
+
+  on('ui.close', { id: DOCK }, async ($, e, next) => {
+    const result = await next(e)
+    if (e.origin.kind === 'person') live.dockDismissed = true
+    stopDockPoll()
+    // The band waits while the dock is drawn: draw it again now that the dock is gone.
+    await update($, band, held => held && { ...held })
+    return result
   })
 }
 
