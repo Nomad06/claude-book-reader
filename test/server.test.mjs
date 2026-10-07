@@ -479,3 +479,46 @@ describe('untrusted page numbers', () => {
     assert.deepEqual(book.read, [5])
   })
 })
+
+describe('titles saved by an older version', () => {
+  test('lose their control characters when the server loads them', async () => {
+    const oldData = await fs.mkdtemp(path.join(os.tmpdir(), 'book-reader-old-'))
+    const id = 'aaaaaaaaaaaa'
+    const saved = {
+      version: 1,
+      currentId: id,
+      books: {
+        [id]: {
+          id,
+          path: '/books/old.pdf',
+          title: 'Old\u001b[2J Book',
+          page: 1,
+          pages: 10,
+          read: [],
+          outline: [{ title: 'Ch\u001b]0;x\u0007 One', page: 1, level: 0 }],
+        },
+      },
+      settings: {},
+    }
+    await fs.writeFile(path.join(oldData, 'state.json'), JSON.stringify(saved))
+    const oldPort = await freePort()
+    const old = spawn(process.execPath, [SERVER, '--port', String(oldPort), '--data', oldData, '--no-launch'], { stdio: 'ignore' })
+    try {
+      const get = async urlPath => {
+        for (let i = 0; i < 100; i++) {
+          try {
+            const res = await fetch(`http://127.0.0.1:${oldPort}${urlPath}`)
+            if (res.ok) return await res.json()
+          } catch {}
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+        throw new Error('old-state server did not start')
+      }
+      assert.equal((await get('/api/state')).current.title, 'Old[2J Book')
+      assert.equal((await get(`/api/books/${id}`)).outline[0].title, 'Ch]0;x One')
+    } finally {
+      await new Promise(resolve => old.once('exit', resolve).kill())
+      await fs.rm(oldData, { recursive: true, force: true })
+    }
+  })
+})

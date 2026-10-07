@@ -120,6 +120,15 @@ async function loadState() {
   try {
     const parsed = JSON.parse(await fsp.readFile(STATE_FILE, 'utf8'))
     const base = emptyState()
+    // Titles saved by an older version were never cleaned: clean them now.
+    for (const book of Object.values(parsed.books ?? {})) {
+      if (typeof book?.title === 'string') book.title = plainText(book.title) || 'book'
+      if (Array.isArray(book?.outline)) {
+        for (const entry of book.outline) {
+          if (typeof entry?.title === 'string') entry.title = plainText(entry.title) || '(untitled)'
+        }
+      }
+    }
     return { ...base, ...parsed, settings: { ...base.settings, ...parsed.settings } }
   } catch {
     return emptyState()
