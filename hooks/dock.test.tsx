@@ -88,3 +88,91 @@ describe('reading dock', () => {
     await ui.unmount()
   })
 })
+
+const OUTLINE = [
+  { title: 'Arrakis', page: 1, level: 0 },
+  { title: 'Muad’Dib', page: 40, level: 0 },
+  { title: 'The Prophet', page: 200, level: 0 },
+]
+
+async function openOnTask($: TestDollar, on: TestOn, reader: Partial<Reader>) {
+  const w = world(on, { viewers: 0, hasBook: true, ...reader }, { placesPanes: true })
+  await $.turn.start({ text: 'build', turnId: 't1' })
+  await w.clock.advance(5_000)
+  return w
+}
+
+describe('reading dock face', () => {
+  test('progress, heatmap and contents with ticks', async ($, on) => {
+    await openOnTask($, on, { read: Array.from({ length: 39 }, (_, i) => i + 1), outline: OUTLINE })
+    for (const surface of SURFACES) {
+      const ui = await mountDock($, surface)
+      expect(await ui.find({ type: 'Text', text: /p\. 42 \/ 300 · 12%/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /▀/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /C O N T E N T S/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^✓$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^▸$/ })).toBeDefined()
+      expect(await ui.find({ key: 'ch-40-1' })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
+  test('pressing a chapter puts the reader there', async ($, on) => {
+    const { posted } = await openOnTask($, on, { outline: OUTLINE })
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'ch-200-2' })
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', page: 200 })
+    await ui.unmount()
+  })
+
+  test('contents before the first open', async ($, on) => {
+    await openOnTask($, on, { outline: null })
+    const ui = await mountDock($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /Contents appear after the first open/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('contents of a book without any', async ($, on) => {
+    await openOnTask($, on, { outline: [] })
+    const ui = await mountDock($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /No table of contents in this book/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the library lists books and switches to one', async ($, on) => {
+    const { posted } = await openOnTask($, on, {})
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'dock-library' })
+    expect(await ui.find({ type: 'Text', text: /L I B R A R Y/ })).toBeDefined()
+    await ui.press({ key: 'book-abc123abc123' })
+    expect(posted('/api/books/abc123abc123/select')).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: /L I B R A R Y/ })).toBeUndefined()
+    await ui.press({ key: 'dock-library' })
+    await ui.press({ key: 'dock-back' })
+    expect(await ui.find({ type: 'Text', text: /L I B R A R Y/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('open reader raises the reader', async ($, on) => {
+    const { posted } = await openOnTask($, on, {})
+    const before = posted('/api/show').length
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'dock-open' })
+    expect(posted('/api/show').length).toBe(before + 1)
+    await ui.unmount()
+  })
+
+  test('narrower docks drop the spine, heatmap and contents; the narrowest keep three lines', async ($, on) => {
+    await openOnTask($, on, { outline: OUTLINE })
+    let ui = await mountDock($, 'terminal', 50)
+    expect(await ui.find({ type: 'Text', text: /▀/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /C O N T E N T S/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Muad’Dib/ })).toBeDefined()
+    await ui.unmount()
+    ui = await mountDock($, 'terminal', 30)
+    expect(await ui.find({ type: 'Text', text: /^Dune$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /p\. 42 \/ 300 · 12%/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /● working/ })).toBeDefined()
+    await ui.unmount()
+  })
+})

@@ -16,6 +16,7 @@ const DOCK = 'book-dock'
 const dock = atom({ plugin: 'book-reader', key: 'dock' } as const, null)
 const dockTask = atom({ plugin: 'book-reader', key: 'dockTask' } as const, null)
 const blink = atom({ plugin: 'book-reader', key: 'blink' } as const, false)
+const dockView = atom({ plugin: 'book-reader', key: 'dockView' } as const, 'main')
 
 const HELP = [
   '/book                 open the current book now (or pick one)',
@@ -267,9 +268,10 @@ function where(book: BookSummary): string {
   return book.pages ? `p. ${book.page}/${book.pages}` : `p. ${book.page}`
 }
 
-// Opens the reader window, or brings the open one forward; false when there is no book.
-async function show($: EngineInterface): Promise<boolean> {
-  const shown = await api<{ shown: boolean; reason?: string; url?: string }>($, 'POST', '/api/show', { window: cfg.window })
+// Opens the reader window, or brings the open one forward (at `page`, when
+// given); false when there is no book.
+async function show($: EngineInterface, page?: number): Promise<boolean> {
+  const shown = await api<{ shown: boolean; reason?: string; url?: string }>($, 'POST', '/api/show', { window: cfg.window, page })
   if (shown.reason === 'no-browser') throw new Error(`no browser could be opened; open ${shown.url} yourself`)
   return shown.shown
 }
@@ -345,6 +347,25 @@ async function dockPress($: EngineInterface, element: string): Promise<void> {
     if (element === 'dock-close') await closeBook($)
     else await keepReading($)
     await update($, dockTask, () => null)
+    return
+  }
+  if (element === 'dock-open') {
+    await showBook($)
+    return
+  }
+  const chapter = /^ch-(\d+)-\d+$/.exec(element)
+  if (chapter) {
+    await ensureServer($)
+    await show($, Number(chapter[1]))
+    return
+  }
+  const book = /^book-([0-9a-f]{12})$/.exec(element)
+  if (book) {
+    await ensureServer($)
+    await api($, 'POST', `/api/books/${book[1]}/select`)
+    await update($, dockView, () => 'main')
+    await show($)
+    await refreshDock($)
   }
 }
 
