@@ -488,13 +488,17 @@ function requireBook(id) {
   return book
 }
 
+// No real PDF comes near this; a larger page count from the reader is refused.
+const MAX_PAGES = 100_000
+
 function mergeProgress(book, body) {
   if (typeof body.location === 'string' && body.location.length < 200) book.location = body.location
   if (Number.isInteger(body.page) && body.page > 0) book.page = body.page
-  if (Number.isInteger(body.pages) && body.pages > 0) book.pages = body.pages
+  if (Number.isInteger(body.pages) && body.pages > 0 && body.pages <= MAX_PAGES) book.pages = body.pages
   if (typeof body.title === 'string' && plainText(body.title) && body.title.length < 300) book.title = plainText(body.title)
   const read = new Set(book.read ?? [])
-  for (const p of Array.isArray(body.read) ? body.read : []) if (Number.isInteger(p) && p > 0) read.add(p)
+  const lastPage = book.pages ?? MAX_PAGES
+  for (const p of Array.isArray(body.read) ? body.read : []) if (Number.isInteger(p) && p > 0 && p <= lastPage) read.add(p)
   for (const p of Array.isArray(body.unread) ? body.unread : []) read.delete(p)
   book.read = [...read].sort((a, b) => a - b)
   book.updatedAt = Date.now()

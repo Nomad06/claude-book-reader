@@ -137,12 +137,30 @@ export function chapters(outline: OutlineEntry[] | null, read: readonly number[]
   const top = outline.filter(entry => entry.level === 0)
   const picked = (top.length >= 3 ? top : outline.filter(entry => entry.level <= 1)).slice().sort((a, b) => a.page - b.page)
   const last = pages ?? Math.max(page, ...picked.map(entry => entry.page))
-  const isRead = new Set(read)
   const current = picked.reduce((found, entry, i) => (entry.page <= page ? i : found), -1)
+  const ends = picked.map((entry, i) => Math.max(entry.page, (picked[i + 1]?.page ?? last + 1) - 1))
+  // One pass over the read pages, never over the page range: a page count
+  // comes from the reader and may be absurd.
+  const readIn = picked.map(() => 0)
+  for (const p of new Set(read)) {
+    let lo = 0
+    let hi = picked.length - 1
+    let at = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (picked[mid]!.page <= p) {
+        at = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    // Entries on one page share it: walk back over those whose range holds p.
+    for (let k = at; k >= 0 && ends[k]! >= p; k--) readIn[k]!++
+  }
   return picked.map((entry, i) => {
-    const endPage = Math.max(entry.page, (picked[i + 1]?.page ?? last + 1) - 1)
-    let readPages = 0
-    for (let p = entry.page; p <= endPage; p++) if (isRead.has(p)) readPages++
+    const endPage = ends[i]!
+    const readPages = readIn[i]!
     const span = endPage - entry.page + 1
     const status = i === current ? 'current' : readPages === span ? 'done' : 'todo'
     return { title: entry.title, page: entry.page, endPage, status, percent: Math.round((100 * readPages) / span), readPages }
@@ -163,15 +181,19 @@ export type HeatCell = { top: Bucket; bottom: Bucket }
 export function heatmap(read: readonly number[], page: number, pages: number | null, width: number): HeatCell[] {
   if (!pages || width < 1) return []
   const size = Math.ceil(pages / (2 * width))
-  const isRead = new Set(read)
+  // Read pages per bucket in one pass over the read pages, never over the pages.
+  const counts = new Map<number, number>()
+  for (const p of new Set(read)) {
+    if (p < 1 || p > pages) continue
+    const at = Math.floor((p - 1) / size)
+    counts.set(at, (counts.get(at) ?? 0) + 1)
+  }
   const bucket = (i: number): Bucket => {
     const first = i * size + 1
     if (first > pages) return 'none'
     const last = Math.min(pages, first + size - 1)
     if (page >= first && page <= last) return 'current'
-    let count = 0
-    for (let p = first; p <= last; p++) if (isRead.has(p)) count++
-    return count * 2 > last - first + 1 ? 'read' : 'unread'
+    return (counts.get(i) ?? 0) * 2 > last - first + 1 ? 'read' : 'unread'
   }
   const cells = Math.ceil(Math.ceil(pages / size) / 2)
   return Array.from({ length: cells }, (_, i) => ({ top: bucket(2 * i), bottom: bucket(2 * i + 1) }))

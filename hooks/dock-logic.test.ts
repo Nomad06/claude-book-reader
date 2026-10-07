@@ -227,3 +227,22 @@ describe('dock summary and model', () => {
     expect(down.isServerUp).toBe(false)
   })
 })
+
+describe('dock logic with absurd page counts', () => {
+  // A page count comes from the reader; a bogus one must not stall the drawing.
+  test('the heatmap does not walk every page of a huge book', () => {
+    const cells = heatmap([1, 2, 3], 2, 10_000_000_000, 56)
+    expect(cells).toHaveLength(56)
+    expect(cells[0]).toEqual({ top: 'current', bottom: 'unread' })
+  })
+
+  test('chapters do not walk every page of a huge book', () => {
+    const rows = chapters([{ title: 'A', page: 1, level: 0 }, { title: 'B', page: 2, level: 0 }, { title: 'C', page: 3, level: 0 }], [1, 3, 4], 1, 10_000_000_000)
+    expect(rows.map(row => row.readPages)).toEqual([1, 0, 2])
+  })
+
+  test('two entries on one page both count it', () => {
+    const rows = chapters([{ title: 'A', page: 1, level: 0 }, { title: 'B', page: 1, level: 0 }, { title: 'C', page: 3, level: 0 }], [1, 2], 3, 4)
+    expect(rows.map(row => [row.title, row.readPages, row.status])).toEqual([['A', 1, 'done'], ['B', 2, 'done'], ['C', 0, 'current']])
+  })
+})

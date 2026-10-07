@@ -464,3 +464,17 @@ describe('untrusted titles', () => {
     assert.equal(json.book.title, 'esc[2Jname')
   })
 })
+
+describe('untrusted page numbers', () => {
+  test('a page count over 100000 and read pages past the end are refused', async () => {
+    const file = await writePdf('huge.pdf')
+    const { json } = await request('POST', '/api/books', { body: { path: file } })
+    const id = json.book.id
+    await request('POST', `/api/books/${id}/progress`, { body: { pages: 10_000_000_000 } })
+    assert.equal((await request('GET', `/api/books/${id}`)).json.pages, null)
+    await request('POST', `/api/books/${id}/progress`, { body: { pages: 10, read: [5, 11, 1_000_000_000] } })
+    const book = (await request('GET', `/api/books/${id}`)).json
+    assert.equal(book.pages, 10)
+    assert.deepEqual(book.read, [5])
+  })
+})
