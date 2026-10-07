@@ -1,0 +1,124 @@
+import { mock } from 'claude-code/testing'
+import type { On } from 'claude-code'
+
+type Call = { method: string; path: string; body: Record<string, unknown> | undefined }
+
+export const BOOK = { id: 'abc123abc123', path: '/books/dune.pdf', title: 'Dune', page: 42, pages: 300, readCount: 37, openedAt: 1 }
+
+const MANIFEST = '/.claude-plugin/plugin.json'
+
+export type Reader = {
+  viewers: number
+  hasBook: boolean
+  isUp?: boolean
+  version?: string
+  launchedFrom?: string
+  /** Linux with no xdg-open and no Chromium browser. */
+  hasNoBrowser?: boolean
+}
+
+export type Host = {
+  /** The OS the session runs on, as the mod tells it: Windows sets OS=Windows_NT. */
+  os?: 'unix' | 'windows'
+  cwd?: string
+  /** What `where.exe node` prints on Windows; absent, it finds nothing. */
+  whereNode?: string
+  /** Files that exist, for the mod's fallback search on Windows. */
+  files?: string[]
+  /** More environment variables of the session. */
+  env?: Record<string, string>
+  /** What the Windows window-owner search prints. */
+  windowPid?: string
+}
+
+const ok = (stdout: string, exitCode = 0) => ({
+  value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+})
+
+// A stand-in for the machine and for server/server.mjs: answers the module's
+// process, file and HTTP calls, and records them.
+export function world(on: On, reader: Reader, hostOptions: Host = {}) {
+  const host = { os: 'unix', cwd: '/home/me/project', files: [], ...hostOptions }
+  const calls: Call[] = []
+  const runs: string[][] = []
+  const task = { state: 'idle', seq: 0, acked: true }
+  let pluginRoot = ''
+  const baseEnv = host.os === 'windows' ? { OS: 'Windows_NT', ProgramFiles: 'C:\\Program Files' } : {}
+  mock.env(on, { ...baseEnv, ...host.env })
+  on('fs.read', ($, e) => {
+    // On Windows the engine hands the path over with backslashes.
+    if (!e.path.replaceAll('\\', '/').endsWith(MANIFEST)) return { deny: 'not in this test' }
+    pluginRoot = e.path.slice(0, -MANIFEST.length)
+    return { value: JSON.stringify({ version: '1.2.3' }) }
+  })
+  // The test runs on this machine, whose engine resolves a Windows path against its own cwd.
+  on('fs.exists', ($, e) => ({ value: host.files.some(file => e.path === file || e.path.endsWith(`/${file}`)) }))
+  on('session.cwd', () => ({ value: host.cwd }))
+  mock.store(on)
+  const clock = mock.clock(on, { now: 1_000 })
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({}))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('process.run', ($, e) => {
+    runs.push([...e.argv])
+    if (e.argv[0] === '/bin/sh') return ok('/usr/local/bin/node\n')
+    if (e.argv[0] === 'where.exe') return host.whereNode ? ok(host.whereNode) : ok('', 1)
+    if (e.argv[0] === 'powershell.exe') return host.windowPid ? ok(host.windowPid) : ok('', 1)
+    if (e.argv.includes('--daemon')) {
+      const launchedFrom = e.argv[e.argv.indexOf('--launched-from') + 1]
+      Object.assign(reader, { isUp: true, version: '1.2.3', launchedFrom })
+    }
+    return ok('{"ok":true}')
+  })
+  on('http.fetch', ($, e) => {
+    const url = new URL(e.url)
+    const method = e.init?.method ?? 'GET'
+    const body = e.init?.body ? (JSON.parse(e.init.body) as Record<string, unknown>) : undefined
+    calls.push({ method, path: url.pathname, body })
+    const json = (value: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(value) } })
+    if (reader.isUp === false) return { deny: 'connection refused' }
+    switch (url.pathname) {
+      case '/api/health':
+        return json({ app: 'book-reader', version: reader.version ?? '1.2.3', launchedFrom: reader.launchedFrom ?? pluginRoot })
+      case '/api/shutdown':
+        reader.isUp = false
+        return json({ ok: true })
+      case '/api/state':
+        return json({ current: reader.hasBook ? BOOK : null, books: [BOOK], viewers: reader.viewers, task })
+      case '/api/books':
+        return json({ book: { ...BOOK, path: body?.path } })
+      case '/api/show':
+        if (reader.hasNoBrowser) return json({ shown: false, reason: 'no-browser', url: 'http://127.0.0.1:47321/' })
+        reader.viewers = 1
+        return json({ shown: true, launched: true })
+      case '/api/task':
+        if (body?.state === 'ack') task.acked = true
+        else if (typeof body?.state === 'string') Object.assign(task, { state: body.state, acked: false })
+        return json({ task, viewers: reader.viewers })
+      case '/api/close':
+        reader.viewers = 0
+        return json({ closed: 1 })
+      default:
+        return json({})
+    }
+  })
+  const posted = (path: string) => calls.filter(c => c.method === 'POST' && c.path === path)
+  const daemon = () => runs.find(argv => argv.includes('--daemon'))
+  return { calls, runs, clock, posted, daemon, root: () => pluginRoot }
+}
+
+export const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const
+
+export const BAND_PROPS = {
+  hasSurvey: false,
+  isWorking: false,
+  maxRows: 6,
+  bodyColumns: 100,
+  scroll: { offset: 0, bodyRows: 6 },
+  view: {},
+}
