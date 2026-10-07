@@ -501,6 +501,26 @@ function mergeProgress(book, body) {
   scheduleSave()
 }
 
+// The contents the reader found in the PDF, for the dock in Claude Code.
+function cleanOutline(body, pages) {
+  const list = body?.outline
+  if (!Array.isArray(list) || list.length > 2000) throw httpError(400, 'outline must be an array of at most 2000 entries')
+  return list.map(entry => {
+    const isEntry =
+      entry !== null &&
+      typeof entry === 'object' &&
+      typeof entry.title === 'string' &&
+      Number.isInteger(entry.page) &&
+      entry.page > 0 &&
+      (!pages || entry.page <= pages) &&
+      Number.isInteger(entry.level) &&
+      entry.level >= 0 &&
+      entry.level <= 9
+    if (!isEntry) throw httpError(400, 'each outline entry is { title, page, level }')
+    return { title: entry.title.trim().slice(0, 200) || '(untitled)', page: entry.page, level: entry.level }
+  })
+}
+
 async function route(req, res) {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
   const p = url.pathname
@@ -541,7 +561,7 @@ async function route(req, res) {
   if (bookMatch) {
     const book = requireBook(bookMatch[1])
     const action = bookMatch[2] ?? ''
-    if (action === '' && m === 'GET') return sendJson(res, 200, { ...book })
+    if (action === '' && m === 'GET') return sendJson(res, 200, { ...book, outline: book.outline ?? null })
     if (action === '' && m === 'DELETE') {
       delete state.books[book.id]
       if (state.currentId === book.id) state.currentId = null
@@ -560,6 +580,11 @@ async function route(req, res) {
     if (action === '/progress' && m === 'POST') {
       mergeProgress(book, await readBody(req))
       return sendJson(res, 200, { ok: true, readCount: book.read.length })
+    }
+    if (action === '/outline' && m === 'POST') {
+      book.outline = cleanOutline(await readBody(req), book.pages)
+      scheduleSave()
+      return sendJson(res, 200, { ok: true, entries: book.outline.length })
     }
     if (action === '/reset' && m === 'POST') {
       book.read = []
@@ -581,9 +606,18 @@ async function route(req, res) {
 
   if (p === '/api/show' && m === 'POST') {
     const body = await readBody(req)
-    if (!state.currentId) return sendJson(res, 200, { shown: false, reason: 'no-book' })
+    const book = state.books[state.currentId]
+    if (!book) return sendJson(res, 200, { shown: false, reason: 'no-book' })
+    // A page: the dock's chapter jump. The open reader goes there; a reader
+    // opened now starts there.
+    const page = Number.isInteger(body.page) && body.page > 0 ? Math.min(body.page, book.pages ?? body.page) : null
+    if (page !== null) {
+      book.page = page
+      book.location = null
+      scheduleSave()
+    }
     if (clients.size > 0) {
-      broadcast({ type: 'attention' })
+      broadcast(page === null ? { type: 'attention' } : { type: 'goto', id: book.id, page })
       return sendJson(res, 200, { shown: true, launched: false })
     }
     if (Date.now() - lastLaunchAt < 8000) return sendJson(res, 200, { shown: true, launched: false })

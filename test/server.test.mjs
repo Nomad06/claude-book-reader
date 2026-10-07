@@ -356,3 +356,92 @@ describe('removing', () => {
     await fs.access(file) // the file itself stays
   })
 })
+
+describe('dock', () => {
+  async function addBook(name, pages) {
+    const file = await writePdf(name)
+    const { json } = await request('POST', '/api/books', { body: { path: file } })
+    if (pages) await request('POST', `/api/books/${json.book.id}/progress`, { body: { pages } })
+    return json.book.id
+  }
+
+  test('stores the contents the reader reports and returns them with the book', async () => {
+    const id = await addBook('outline.pdf', 50)
+    assert.equal((await request('GET', `/api/books/${id}`)).json.outline, null)
+    const outline = [
+      { title: 'One', page: 1, level: 0 },
+      { title: '  Two  ', page: 20, level: 1 },
+    ]
+    const saved = await request('POST', `/api/books/${id}/outline`, { body: { outline } })
+    assert.equal(saved.status, 200)
+    assert.deepEqual(saved.json, { ok: true, entries: 2 })
+    assert.deepEqual((await request('GET', `/api/books/${id}`)).json.outline, [
+      { title: 'One', page: 1, level: 0 },
+      { title: 'Two', page: 20, level: 1 },
+    ])
+  })
+
+  test('keeps an empty outline: a book without contents', async () => {
+    const id = await addBook('no-outline.pdf', 5)
+    await request('POST', `/api/books/${id}/outline`, { body: { outline: [] } })
+    assert.deepEqual((await request('GET', `/api/books/${id}`)).json.outline, [])
+  })
+
+  test('cuts long titles and names untitled entries', async () => {
+    const id = await addBook('titles.pdf', 5)
+    const outline = [
+      { title: 'x'.repeat(500), page: 1, level: 0 },
+      { title: '   ', page: 2, level: 0 },
+    ]
+    await request('POST', `/api/books/${id}/outline`, { body: { outline } })
+    const saved = (await request('GET', `/api/books/${id}`)).json.outline
+    assert.equal(saved[0].title.length, 200)
+    assert.equal(saved[1].title, '(untitled)')
+  })
+
+  test('refuses contents of the wrong shape', async () => {
+    const id = await addBook('bad-outline.pdf', 10)
+    const bad = [
+      'nope',
+      [{ title: 'A', page: 0, level: 0 }],
+      [{ title: 'A', page: 11, level: 0 }],
+      [{ title: 'A', page: 1.5, level: 0 }],
+      [{ title: 'A', page: 1, level: 10 }],
+      [{ title: 7, page: 1, level: 0 }],
+      [null],
+      Array.from({ length: 2001 }, () => ({ title: 'A', page: 1, level: 0 })),
+    ]
+    for (const outline of bad) {
+      const res = await request('POST', `/api/books/${id}/outline`, { body: { outline } })
+      assert.equal(res.status, 400, JSON.stringify(outline).slice(0, 60))
+    }
+    assert.equal((await request('GET', `/api/books/${id}`)).json.outline, null)
+  })
+
+  test('show with a page moves an open reader there', async () => {
+    const id = await addBook('jump.pdf', 100)
+    await request('POST', `/api/books/${id}/progress`, { body: { page: 3, location: '#page=3&zoom=auto' } })
+    const stream = events()
+    await stream.next('hello')
+    const shown = await request('POST', '/api/show', { body: { window: 'app', page: 40 } })
+    assert.deepEqual(shown.json, { shown: true, launched: false })
+    const goto = await stream.next('goto')
+    assert.equal(goto.id, id)
+    assert.equal(goto.page, 40)
+    const book = (await request('GET', `/api/books/${id}`)).json
+    assert.equal(book.page, 40)
+    assert.equal(book.location, null)
+    stream.close()
+    await new Promise(resolve => setTimeout(resolve, 100))
+  })
+
+  test('show with a page and no reader saves the place, clamped to the book', async () => {
+    const id = await addBook('clamp.pdf', 100)
+    const res = await request('POST', '/api/show', { body: { window: 'app', page: 500 } })
+    // An earlier test launched within 8 s, so this one may answer launched: false.
+    assert.equal(res.json.shown, true)
+    const book = (await request('GET', `/api/books/${id}`)).json
+    assert.equal(book.page, 100)
+    assert.equal(book.location, null)
+  })
+})
