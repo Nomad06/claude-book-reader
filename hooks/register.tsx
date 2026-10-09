@@ -410,24 +410,29 @@ function stopDockPoll(): void {
 
 // ------------------------------------------------------------ the reader view
 
-// Fetches one page into the reader view. A newer request wins over a late answer.
+// Fetches one page into the reader view. A newer request wins over a late answer:
+// every write checks, at the moment it is made, that no newer request began (a
+// write the engine retries runs its check again), and an older request never
+// posts its page as the place.
 async function loadPage($: EngineInterface, book: BookSummary, page: number): Promise<void> {
   const request = ++live.pageRequest
-  await update($, readerNote, () => `Loading page ${page}…`)
+  const isLatest = () => request === live.pageRequest
+  await update($, readerNote, note => (isLatest() ? `Loading page ${page}…` : note))
   try {
     const answer = await api<Omit<ReaderPage, 'bookId' | 'fetchedAt'>>($, 'GET', `/api/books/${book.id}/page/${page}`)
-    if (request !== live.pageRequest) return
+    if (!isLatest()) return
     const now = await $.clock.now()
-    await update($, readerPage, () => ({ ...answer, bookId: book.id, fetchedAt: now }))
-    await update($, readerNote, () => answer.error ?? null)
-    await update($, readerShownAt, () => now)
+    await update($, readerPage, held => (isLatest() ? { ...answer, bookId: book.id, fetchedAt: now } : held))
+    await update($, readerNote, note => (isLatest() ? (answer.error ?? null) : note))
+    await update($, readerShownAt, at => (isLatest() ? now : at))
+    if (!isLatest()) return
     await api($, 'POST', `/api/books/${book.id}/progress`, { page })
+    if (!isLatest()) return
     // The new page starts at its top; a pane that cannot scroll still shows the page.
     await $.ui.scroll({ to: 'start', in: DOCK }).catch(error => $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' }))
     await refreshDock($)
   } catch (error) {
-    if (request !== live.pageRequest) return
-    await update($, readerNote, () => `Could not load page ${page}: ${messageOf(error)}`)
+    await update($, readerNote, note => (isLatest() ? `Could not load page ${page}: ${messageOf(error)}` : note))
   }
 }
 
@@ -435,31 +440,42 @@ async function currentReaderBook($: EngineInterface): Promise<BookDetail | null>
   return (await read($, dock))?.current ?? null
 }
 
-async function turnPage($: EngineInterface, delta: number): Promise<void> {
+// The page the reader shows of `book`; a page left from another book is none.
+async function shownPageOf($: EngineInterface, book: BookSummary): Promise<ReaderPage | null> {
   const shown = await read($, readerPage)
+  return shown && shown.bookId === book.id ? shown : null
+}
+
+async function turnPage($: EngineInterface, delta: number): Promise<void> {
   const book = await currentReaderBook($)
-  if (!shown || !book) return
-  const page = shown.page + delta
-  if (page < 1 || page > shown.pages) return
+  if (!book) return
+  // Nothing of this book shown yet (its page failed): turn from its saved place.
+  const shown = await shownPageOf($, book)
+  const pages = shown?.pages ?? book.pages
+  const page = (shown?.page ?? book.page) + delta
+  if (page < 1 || (pages !== null && page > pages)) return
   await loadPage($, book, page)
 }
 
 async function gotoPage($: EngineInterface, input: string): Promise<void> {
-  const shown = await read($, readerPage)
   const book = await currentReaderBook($)
   if (!book) return
-  const page = parseGoto(input, shown?.pages ?? book.pages)
+  const shown = await shownPageOf($, book)
+  const pages = shown?.pages ?? book.pages
+  const page = parseGoto(input, pages)
   if (page === null) {
-    await update($, readerNote, () => `No page ${input.trim()}${shown ? `; the book has ${shown.pages}` : ''}`)
+    await update($, readerNote, () => `No page ${input.trim()}${pages !== null ? `; the book has ${pages}` : ''}`)
     return
   }
   await loadPage($, book, page)
 }
 
+// Marks the page shown read, or unread again; nothing when no page of this book is shown.
 async function markRead($: EngineInterface): Promise<void> {
-  const shown = await read($, readerPage)
   const book = await currentReaderBook($)
-  if (!shown || !book) return
+  if (!book) return
+  const shown = await shownPageOf($, book)
+  if (!shown) return
   const isRead = book.read.includes(shown.page)
   await api($, 'POST', `/api/books/${book.id}/progress`, isRead ? { unread: [shown.page] } : { read: [shown.page] })
   await refreshDock($)
@@ -501,7 +517,8 @@ async function dockPress($: EngineInterface, element: string): Promise<void> {
   if (element === 'reader-mark') return markRead($)
   if (element === 'reader-open') {
     // The escape hatch: the browser at the page shown, whatever the mode.
-    const shown = await read($, readerPage)
+    const book = await currentReaderBook($)
+    const shown = book ? await shownPageOf($, book) : null
     await ensureServer($)
     await show($, shown?.page)
     startDockPoll($)
@@ -750,7 +767,7 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
   if (verb === 'open' && rest[0]?.toLowerCase() === 'browser') {
     const state = await api<ReaderState>($, 'GET', '/api/state')
     if (!state.current) return 'No book chosen: /book choose'
-    await show($, (await read($, readerPage))?.page)
+    await show($, (await shownPageOf($, state.current))?.page)
     return `📖 ${state.current.title} · ${where(state.current)} · in the browser`
   }
 
@@ -847,13 +864,19 @@ export const register: Register = (on, options) => {
       immediate: true,
     })
     // Pictures in the reader view: drawn where the terminal speaks kitty graphics.
-    const env = {
-      TERM_PROGRAM: await $.env.get('TERM_PROGRAM'),
-      TERM: await $.env.get('TERM'),
-      KITTY_WINDOW_ID: await $.env.get('KITTY_WINDOW_ID'),
-      GHOSTTY_RESOURCES_DIR: await $.env.get('GHOSTTY_RESOURCES_DIR'),
+    // A failed look reads as none: the reader then draws a line for each picture.
+    try {
+      const env = {
+        TERM_PROGRAM: await $.env.get('TERM_PROGRAM'),
+        TERM: await $.env.get('TERM'),
+        KITTY_WINDOW_ID: await $.env.get('KITTY_WINDOW_ID'),
+        GHOSTTY_RESOURCES_DIR: await $.env.get('GHOSTTY_RESOURCES_DIR'),
+      }
+      await update($, graphics, () => isGraphicsTerminal(env))
+    } catch (error) {
+      $.ui.log(`book-reader: graphics detection: ${messageOf(error)}`, { to: 'debug' })
+      await update($, graphics, () => false).catch(() => {})
     }
-    await update($, graphics, () => isGraphicsTerminal(env))
     return next(e)
   })
 

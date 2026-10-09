@@ -35,6 +35,8 @@ export type Reader = {
   readPages?: number[]
   /** Pages whose answer waits until the test calls `release(n)` (for racing tests). */
   holdPages?: number[]
+  /** Pages whose fetch fails, as the server answers a book whose file is gone. */
+  failPages?: number[]
 }
 
 export type Host = {
@@ -152,6 +154,8 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
     calls.push({ method, path: url.pathname, body })
     const json = (value: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(value) } })
     if (reader.isUp === false) return { deny: 'connection refused' }
+    // The book routes answer for the current book (BOOK, or the one `reader.book` switched to).
+    const book = { ...BOOK, ...reader.book }
     switch (url.pathname) {
       case '/api/health':
         return json({ app: 'book-reader', version: reader.version ?? '1.2.3', launchedFrom: reader.launchedFrom ?? pluginRoot })
@@ -159,23 +163,22 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
         reader.isUp = false
         return json({ ok: true })
       case '/api/state': {
-        const current = { ...BOOK, ...reader.book }
         const settings = { theme: 'light', readSeconds: 6, ...(reader.mode ? { mode: reader.mode } : {}) }
-        return json({ current: reader.hasBook ? current : null, books: [current], viewers: reader.viewers, task, settings })
+        return json({ current: reader.hasBook ? book : null, books: [book], viewers: reader.viewers, task, settings })
       }
       case '/api/settings':
         if (body?.mode === 'text' || body?.mode === 'browser') reader.mode = body.mode
         return json({ settings: { theme: 'light', readSeconds: 6, mode: reader.mode } })
-      case `/api/books/${BOOK.id}/progress`: {
+      case `/api/books/${book.id}/progress`: {
         if (Array.isArray(body?.read)) reader.readPages = [...new Set([...(reader.readPages ?? []), ...(body.read as number[])])]
         if (Array.isArray(body?.unread)) reader.readPages = (reader.readPages ?? []).filter(p => !(body.unread as number[]).includes(p))
         if (typeof body?.page === 'number') reader.book = { ...reader.book, page: body.page }
         return json({ ok: true, readCount: reader.readPages?.length ?? 0 })
       }
-      case `/api/books/${BOOK.id}/select`:
-        return json({ book: { ...BOOK, ...reader.book } })
-      case `/api/books/${BOOK.id}`:
-        return json({ ...BOOK, ...reader.book, read: reader.readPages ?? reader.read ?? [], outline: reader.outline ?? null })
+      case `/api/books/${book.id}/select`:
+        return json({ book })
+      case `/api/books/${book.id}`:
+        return json({ ...book, read: reader.readPages ?? reader.read ?? [], outline: reader.outline ?? null })
       case '/api/books':
         return json({ book: { ...BOOK, path: body?.path } })
       case '/api/show':
@@ -190,11 +193,12 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
         reader.viewers = 0
         return json({ closed: 1 })
       default: {
-        const page = new RegExp(`^/api/books/${BOOK.id}/page/(\\d+)$`).exec(url.pathname)
+        const page = new RegExp(`^/api/books/${book.id}/page/(\\d+)$`).exec(url.pathname)
         if (page) {
           const n = Number(page[1])
+          if (reader.failPages?.includes(n)) return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'file missing' }) } }
           const given = reader.pages?.[n] ?? {}
-          const answer = json({ page: n, pages: BOOK.pages, blocks: [{ kind: 'para', runs: [{ text: `Page ${n} text.` }] }], scanned: false, ...given })
+          const answer = json({ page: n, pages: book.pages ?? BOOK.pages, blocks: [{ kind: 'para', runs: [{ text: `Page ${n} text.` }] }], scanned: false, ...given })
           if (reader.holdPages?.includes(n)) return new Promise<typeof answer>(resolve => held.set(n, () => resolve(answer)))
           return answer
         }

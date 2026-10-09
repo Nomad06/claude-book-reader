@@ -3,6 +3,8 @@ import { describe, expect, test } from 'claude-code/testing'
 import { BAND_PROPS, BOOK, RUN, mountDock, world } from './test-world.ts'
 import type { Reader } from './test-world.ts'
 
+const OTHER = 'b0b0b0b0b0b0'
+
 describe('book-reader', () => {
   test('a long task opens the book after the delay and the end of the task offers to close it', async ($, on) => {
     const reader = { viewers: 0, hasBook: true }
@@ -349,5 +351,80 @@ describe('book-reader', () => {
     expect(listed.text).toContain('book-reader needs Node 22.13 or newer; found v20.11.1')
     const status = await $.command.run({ ...RUN, command: 'book', args: 'status' })
     expect(status.text).toContain('book-reader needs Node 22.13 or newer; found v20.11.1')
+  })
+
+  test('a page left from another book does not move this book: /book open browser', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    expect(state('readerPage')).toMatchObject({ bookId: BOOK.id, page: 42 })
+    await $.command.run({ ...RUN, command: 'book', args: 'mode browser' })
+    reader.book = { id: OTHER, title: 'Emma', page: 9, pages: 50 }
+    const opened = await $.command.run({ ...RUN, command: 'book', args: 'open browser' })
+    expect(opened.text).toContain('Emma')
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app' })
+  })
+
+  test('a page left from another book: m, o, go to and n start from this book', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', failPages: [9] }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    reader.book = { id: OTHER, title: 'Emma', page: 9, pages: 50 }
+    await $.command.run({ ...RUN, command: 'book', args: '1' })
+    // The pane's work starts once the answer is out; wait (real time) for its failed page.
+    for (let i = 0; i < 40 && !String(state('readerNote')).includes('Could not load page 9'); i++) await new Promise(resolve => setTimeout(resolve, 25))
+    expect(state('readerNote')).toContain('Could not load page 9')
+    expect(state('readerPage')?.bookId).toBe(BOOK.id)
+    await ui.press({ key: 'reader-mark' })
+    expect(posted(`/api/books/${OTHER}/progress`)).toHaveLength(0)
+    await ui.press({ key: 'reader-open' })
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app' })
+    await $.ui.input({ plugin: 'book-reader', key: 'reader-goto', text: '60' })
+    expect(state('readerNote')).toContain('No page 60; the book has 50')
+    await ui.press({ key: 'reader-next' })
+    expect(posted(`/api/books/${OTHER}/progress`).at(-1)?.body).toEqual({ page: 10 })
+    expect(state('readerPage')).toMatchObject({ bookId: OTHER, page: 10 })
+    await ui.unmount()
+  })
+
+  test('an older answer that lands while a newer page is written is dropped', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    // Holds the write of page 43 until the newer page 10 is in.
+    let openGate = () => {}
+    const gate = new Promise<void>(resolve => (openGate = resolve))
+    let isGated = false
+    on('state.set', { key: 'readerPage' }, async ($, e, next) => {
+      if (!isGated && e.key === 'readerPage' && (e.value as { page?: number } | null)?.page === 43) {
+        isGated = true
+        await gate
+      }
+      return next(e)
+    })
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    const slow = ui.press({ key: 'reader-next' })
+    for (let i = 0; i < 40 && !isGated; i++) await new Promise(resolve => setTimeout(resolve, 10))
+    expect(isGated).toBe(true)
+    await $.ui.input({ plugin: 'book-reader', key: 'reader-goto', text: '10' })
+    expect(state('readerPage')?.page).toBe(10)
+    openGate()
+    await slow
+    expect(state('readerPage')?.page).toBe(10)
+    expect(posted(`/api/books/${BOOK.id}/progress`).at(-1)?.body).toEqual({ page: 10 })
+    expect(reader.book?.page).toBe(10)
+    await ui.unmount()
+  })
+
+  test('graphics detection that fails reads as no graphics, and the session still starts', async ($, on) => {
+    on('env.get', { name: 'TERM_PROGRAM' }, () => ({ deny: 'not in this test' }))
+    const { state } = world(on, { viewers: 0, hasBook: true }, { env: { TERM: 'xterm-kitty' } })
+    const started = await $.session.start({ cwd: '/home/me/project' })
+    expect(started).toEqual({ cwd: '/home/me/project' })
+    expect(state('graphics')).toBe(false)
   })
 })
