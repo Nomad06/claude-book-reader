@@ -25,7 +25,7 @@ describe('reader view', () => {
     await clock.advance(5_000)
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await mountDock($, surface)
-      expect(await ui.find({ type: 'Text', text: /C O S T {3}A N D {3}L A T E N C Y/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^Cost and Latency$/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /p\. 42 \/ 300/ })).toBeDefined()
       expect((await ui.find({ type: 'Text', text: /^slow$/ }))?.props.italic).toBe(true)
       expect((await ui.find({ type: 'Text', text: /^costly$/ }))?.props.bold).toBe(true)
@@ -37,6 +37,82 @@ describe('reader view', () => {
       expect(await ui.find({ type: 'Image' })).toBeUndefined()
       await ui.unmount()
     }
+  })
+
+  test('a heading is plain bold in the accent colour at every level, never spaced', async ($, on) => {
+    const blocks: Block[] = [
+      { kind: 'heading', level: 1, runs: [{ text: 'Глава один', bold: true }] },
+      { kind: 'heading', level: 2, runs: [{ text: 'Раздел два', bold: true }] },
+    ]
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', pages: { 42: { blocks } } }
+    const { clock } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    expect((await ui.find({ type: 'Text', text: /^Глава один$/ }))?.props).toMatchObject({ bold: true })
+    expect((await ui.find({ type: 'Text', text: /^Раздел два$/ }))?.props).toMatchObject({ bold: true })
+    expect(await ui.find({ type: 'Text', text: /Г л а в а/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a paragraph starts with an indent and draws urls dim, with no extra blank line', async ($, on) => {
+    const blocks: Block[] = [
+      { kind: 'para', runs: [{ text: 'Смотрите ' }, { text: 'https://oreil.ly/abc12', bold: true }, { text: ', или oreil.ly/xyz. Конец.' }] },
+      { kind: 'para', runs: [{ text: 'Второй абзац.' }] },
+    ]
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', pages: { 42: { blocks } } }
+    const { clock } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /^ {3}Смотрите / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {3}Второй абзац\.$/ })).toBeDefined()
+    const url = await ui.find({ type: 'Text', text: /^https:\/\/oreil\.ly\/abc12$/ })
+    expect(url?.props).toMatchObject({ dimColor: true, bold: true })
+    expect((await ui.find({ type: 'Text', text: /^oreil\.ly\/xyz$/ }))?.props).toMatchObject({ dimColor: true })
+    expect((await ui.find({ type: 'Text', text: /^Смотрите $/ }))?.props.dimColor).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a contents entry is a title, a leader to the pane width and the page on the right', async ($, on) => {
+    const blocks: Block[] = [
+      { kind: 'toc', level: 1, page: '460', runs: [{ text: 'Заключение' }] },
+      { kind: 'toc', level: 2, page: 'xvii', runs: [{ text: 'Предисловие' }] },
+      { kind: 'toc', level: 1, page: '475', runs: [{ text: 'Очень длинное название главы про ускорители и оптимизацию вывода моделей' }] },
+    ]
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', pages: { 42: { blocks } } }
+    const { clock } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    const first = await ui.find({ type: 'Text', text: /^Заключение ·+ 460$/ })
+    expect(first).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^ {2}Предисловие ·+ xvii$/ }))).toBeDefined()
+    const wide = await ui.find({ type: 'Text', text: /·+ 475$/ })
+    expect(wide).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Очень длинное название главы/ })).toBeDefined()
+    await ui.unmount()
+    const narrow = await mountDock($, 'terminal', 50)
+    expect(await narrow.find({ type: 'Text', text: /^Заключение ·+ 460$/ })).toBeDefined()
+    await narrow.unmount()
+  })
+
+  test('the header title is cut so the whole header fits one row', async ($, on) => {
+    const title = 'AI-инженерия. Построение приложений с использованием фундаментальных моделей'
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', book: { title } }
+    const { clock } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    // Right part: "p. 42 / 300" + space + 10 bar cells + space + "12%"; one column between.
+    const cut = await ui.find({ type: 'Text', text: /^AI-инженерия.*…$/ })
+    expect(cut).toBeDefined()
+    // 72 - 26 - 1 = 45 columns: 44 letters and the ellipsis.
+    expect(cut?.text).toBe('AI-инженерия. Построение приложений с исполь…')
+    await ui.unmount()
+    const short = await mountDock($, 'terminal', 200)
+    expect(await short.find({ type: 'Text', text: new RegExp(`^${title}$`) })).toBeDefined()
+    await short.unmount()
   })
 
   test('on a graphics terminal the picture is an Image sized to the pane', async ($, on) => {
@@ -125,7 +201,7 @@ describe('reader view', () => {
     const before = fetches()
     await ui.press({ key: 'reader-read' })
     expect(fetches()).toBe(before + 1)
-    expect(await ui.find({ type: 'Text', text: /C O S T {3}A N D {3}L A T E N C Y/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Cost and Latency$/ })).toBeDefined()
     await ui.press({ key: 'reader-library' })
     expect(await ui.find({ type: 'Text', text: /L I B R A R Y/ })).toBeDefined()
     await ui.unmount()

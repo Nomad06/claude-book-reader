@@ -46,3 +46,116 @@ export function imageLine(alt: string, width: number, height: number): string {
 export function listText(runs: Run[]): string {
   return runs.map(run => run.text).join('')
 }
+
+// Display columns: combining marks 0, wide East Asian letters and emoji 2, the rest 1
+// (Cyrillic and Latin letters are one column).
+const isCombining = (cp: number) => (cp >= 0x300 && cp <= 0x36f) || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0xfe00 && cp <= 0xfe0f)
+const isWide = (cp: number) =>
+  (cp >= 0x1100 && cp <= 0x115f) ||
+  (cp >= 0x2e80 && cp <= 0xa4cf) ||
+  (cp >= 0xac00 && cp <= 0xd7a3) ||
+  (cp >= 0xf900 && cp <= 0xfaff) ||
+  (cp >= 0xfe30 && cp <= 0xfe6f) ||
+  (cp >= 0xff00 && cp <= 0xff60) ||
+  (cp >= 0xffe0 && cp <= 0xffe6) ||
+  (cp >= 0x1f300 && cp <= 0x1faff) ||
+  (cp >= 0x20000 && cp <= 0x3fffd)
+
+const charWidth = (ch: string) => {
+  const cp = ch.codePointAt(0) ?? 0
+  return isCombining(cp) ? 0 : isWide(cp) ? 2 : 1
+}
+
+export function textWidth(text: string): number {
+  let width = 0
+  for (const ch of text) width += charWidth(ch)
+  return width
+}
+
+/** The text cut to at most `max` columns, an ellipsis in place of what is left out. */
+export function fitTitle(title: string, max: number): string {
+  if (max <= 0) return ''
+  if (textWidth(title) <= max) return title
+  let out = ''
+  let width = 0
+  for (const ch of title) {
+    const w = charWidth(ch)
+    if (width + w > max - 1) break
+    out += ch
+    width += w
+  }
+  return `${out}…`
+}
+
+/** A contents row: `text`, then (on the entry's last row) a leader and the page. */
+export type TocRow = { text: string; leader: string; page: string }
+
+const LEADER = '·'
+const MIN_LEADER = 2
+
+/** Cuts a word that is wider than `max` into pieces that fit. */
+function cutWord(word: string, max: number): string[] {
+  const pieces: string[] = []
+  let piece = ''
+  for (const ch of word) {
+    if (piece && textWidth(piece) + charWidth(ch) > max) {
+      pieces.push(piece)
+      piece = ''
+    }
+    piece += ch
+  }
+  if (piece) pieces.push(piece)
+  return pieces
+}
+
+/**
+ * A contents entry fitted to `width` columns: indented two columns per level
+ * below the first, the title wrapped, and on the last row the leader filling
+ * the space up to the right-aligned page. A title that leaves no room for the
+ * leader on its last row gets the leader and page on a row of their own.
+ */
+export function tocRows(title: string, page: string, level: number, width: number): TocRow[] {
+  const indent = ' '.repeat(2 * Math.max(0, level - 1))
+  const room = Math.max(1, width - indent.length)
+  const lines: string[] = []
+  let line = ''
+  for (const word of title.split(/\s+/).filter(Boolean)) {
+    for (const piece of textWidth(word) > room ? cutWord(word, room) : [word]) {
+      if (line && textWidth(line) + 1 + textWidth(piece) <= room) line += ` ${piece}`
+      else {
+        if (line) lines.push(line)
+        line = piece
+      }
+    }
+  }
+  if (line) lines.push(line)
+  const rows: TocRow[] = lines.map(text => ({ text: indent + text, leader: '', page: '' }))
+  const tail = (text: string): TocRow | null => {
+    const fill = width - textWidth(text) - textWidth(page) - 2
+    return fill >= MIN_LEADER ? { text, leader: LEADER.repeat(fill), page } : null
+  }
+  const last = rows.length ? tail(rows[rows.length - 1].text) : null
+  if (last) rows[rows.length - 1] = last
+  else rows.push(tail(indent) ?? { text: indent, leader: LEADER.repeat(MIN_LEADER), page })
+  return rows
+}
+
+export type UrlPart = { text: string; isUrl: boolean }
+
+// https://…, www.…, or a bare host with a path (oreil.ly/abc); the bare form needs the path.
+const URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<>"«»]+|(?<![\p{L}\p{N}./@-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/[^\s<>"«»]+/giu
+
+/** The text split into plain parts and urls; a url does not take its closing punctuation. */
+export function splitUrls(text: string): UrlPart[] {
+  const parts: UrlPart[] = []
+  let at = 0
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const url = match[0].replace(/[.,;:!?)\]'»]+$/u, '')
+    const start = match.index ?? 0
+    if (start > at) parts.push({ text: text.slice(at, start), isUrl: false })
+    parts.push({ text: url, isUrl: true })
+    at = start + url.length
+  }
+  if (at < text.length) parts.push({ text: text.slice(at), isUrl: false })
+  return parts
+}

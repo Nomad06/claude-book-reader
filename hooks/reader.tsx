@@ -3,7 +3,7 @@ import type { On } from 'claude-code'
 
 import type { Block, Run } from '../types'
 import { ACCENT_FROM, ACCENT_TO, CURRENT, GREEN, bar, dockModel, gradient, noBookLine, percent, phaseWord, spaced } from './dock-logic.ts'
-import { imageBox, imageLine, listText, pageLabel } from './reader-logic.ts'
+import { fitTitle, imageBox, imageLine, pageLabel, splitUrls, textWidth, tocRows } from './reader-logic.ts'
 
 // The reader view of the Reading Dock: one page of the book as text, drawn
 // from the page register.tsx fetched. Presses that reach the server (page
@@ -24,6 +24,9 @@ const MIN_COLUMNS = 40
 
 /** For a Button whose press register.tsx answers. */
 const answeredByRegister = () => {}
+
+/** A paragraph's first line starts this far in. */
+const PARA_INDENT = '   '
 
 /** How a block styles every run in it (a caption: dim italic). */
 type RunStyle = { italic?: true; dimColor?: true }
@@ -86,16 +89,19 @@ export function registerReader(on: On): void {
     const hairline = <Text dimColor>{'─'.repeat(columns)}</Text>
 
     const runs = (list: Run[], style: RunStyle = {}) =>
-      list.map(run =>
-        run.mono ? (
-          <Text color={CURRENT} {...style}>
-            {run.text}
-          </Text>
-        ) : (
-          <Text bold={run.bold} italic={run.italic ?? style.italic} dimColor={style.dimColor}>
-            {run.text}
-          </Text>
-        ),
+      list.flatMap(run =>
+        run.mono
+          ? [
+              <Text color={CURRENT} {...style}>
+                {run.text}
+              </Text>,
+            ]
+          : // A url is drawn dim; the rest of the run keeps its own style.
+            splitUrls(run.text).map(part => (
+              <Text bold={run.bold} italic={run.italic ?? style.italic} dimColor={style.dimColor || part.isUrl || undefined}>
+                {part.text}
+              </Text>
+            )),
       )
 
     const block = (b: Block, i: number) => {
@@ -103,7 +109,7 @@ export function registerReader(on: On): void {
         case 'heading':
           return b.level === 1 ? (
             <Text bold color={ACCENT_TO} wrap="wrap">
-              {spaced(listText(b.runs))}
+              {runs(b.runs)}
             </Text>
           ) : (
             <Text bold wrap="wrap">
@@ -111,7 +117,33 @@ export function registerReader(on: On): void {
             </Text>
           )
         case 'para':
-          return <Text wrap="wrap">{runs(b.runs)}</Text>
+          return (
+            <Text wrap="wrap">
+              {PARA_INDENT}
+              {runs(b.runs)}
+            </Text>
+          )
+        case 'toc': {
+          // The title may wrap; the leader and the page close its last row.
+          const isBold = b.runs.length > 0 && b.runs.every(run => run.bold)
+          const rows = tocRows(
+            b.runs.map(run => run.text).join(''),
+            b.page,
+            b.level,
+            columns,
+          )
+          return (
+            <Box flexDirection="column">
+              {rows.map(row => (
+                <Text wrap="truncate-end">
+                  <Text bold={isBold}>{row.text}</Text>
+                  {row.leader && <Text dimColor> {row.leader} </Text>}
+                  {row.leader && row.page}
+                </Text>
+              ))}
+            </Box>
+          )
+        }
         case 'list':
           return (
             <Text wrap="wrap">
@@ -165,13 +197,16 @@ export function registerReader(on: On): void {
       }
       // A book whose page count is still unknown has no bar (as dock.tsx's bookHeader).
       const progress = book.pages ? bar(book.readCount / book.pages, 10) : null
+      const label = pageLabel(page?.page ?? book.page, page?.pages ?? book.pages, page ? book.read.includes(page.page) : false)
+      // The title gives way so that label, bar and percent stay on its row; one column between.
+      const rightWidth = textWidth(label) + (progress ? 1 + progress.filled + progress.empty + 1 + `${percent(book.readCount, book.pages)}%`.length : 0)
       return (
         <Box key="header" flexDirection="row" justifyContent="space-between">
           <Text bold wrap="truncate-end">
-            {book.title}
+            {fitTitle(book.title, columns - rightWidth - 1)}
           </Text>
           <Text>
-            {pageLabel(page?.page ?? book.page, page?.pages ?? book.pages, page ? book.read.includes(page.page) : false)}
+            {label}
             {progress && (
               <Text>
                 {' '}
