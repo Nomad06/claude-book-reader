@@ -8,6 +8,7 @@ import fsp from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { MAX_DRAWINGS } from './page-blocks.mjs'
 import { errorLine } from './text.mjs'
 
 export const MAX_IMAGE_WIDTH = 800
@@ -27,7 +28,6 @@ export const FIGURE_RENDER_MS = 5_000
 export const FIGURE_PAGE_MS = 10_000
 const MAX_FIGURE_PIXELS = 1_500_000
 const MAX_FIGURE_SCALE = 3 // pixels per point: sharp enough for any terminal cell
-const MAX_DRAWINGS = 5000 // path boxes reported for one page
 
 // pdf.js warns once at import that it cannot render (no canvas, no DOMMatrix,
 // no Path2D). Without the canvas nothing is rendered (figures become a line),
@@ -215,9 +215,9 @@ function makeDoc(pdf, doc, task, id, imagesDir, renderer) {
 
   /**
    * Renders `region` of page `n` (page coordinates, as page-blocks marks it) to a
-   * raw RGB file within the picture limits; null without a canvas, for a region
-   * too small to show, or when the render takes longer than `timeoutMs` (it is
-   * cancelled then).
+   * raw RGB file within the picture limits; null without a canvas or for a region
+   * too small to show (the same on every try). Throws when the render fails or
+   * takes longer than `timeoutMs` (it is cancelled then): a later try may do.
    */
   async function renderFigure(n, region, { timeoutMs = FIGURE_RENDER_MS, index = 0 } = {}) {
     const canvasLib = renderer()
@@ -234,7 +234,9 @@ function makeDoc(pdf, doc, task, id, imagesDir, renderer) {
       // On a page turned a quarter, the region's width is drawn upright.
       const [w, h] = page.rotate % 180 === 0 ? [right - left, top - bottom] : [top - bottom, right - left]
       const scale = Math.min(MAX_FIGURE_SCALE, MAX_IMAGE_WIDTH / w, MAX_IMAGE_HEIGHT / h, Math.sqrt(MAX_FIGURE_PIXELS / (w * h)))
-      const viewport = page.getViewport({ scale })
+      // pdf.js multiplies a viewport's scale by the page's /UserUnit: divided out, a point is `scale` pixels.
+      const unit = Number.isFinite(page.userUnit) && page.userUnit > 0 ? page.userUnit : 1
+      const viewport = page.getViewport({ scale: scale / unit })
       // The region's corners on the rendered page (a rotated page turns them): the canvas shows just that.
       const [ax, ay] = viewport.convertToViewportPoint(left, top)
       const [bx, by] = viewport.convertToViewportPoint(right, bottom)
@@ -260,11 +262,14 @@ function makeDoc(pdf, doc, task, id, imagesDir, renderer) {
       try {
         await Promise.race([task.promise, waited])
       } catch (error) {
-        if (!late) throw error
+        if (!late) {
+          render = null // failed, so finished: nothing to cancel
+          throw error
+        }
       } finally {
         clearTimeout(timer)
       }
-      if (late) return null
+      if (late) throw new Error(`the figure took longer than ${timeoutMs} ms to render`)
       render = null
       const rgb = toRgb({ width, height, kind: 3, data: context.getImageData(0, 0, width, height).data })
       await fsp.mkdir(imagesDir, { recursive: true, mode: 0o700 })
@@ -305,11 +310,14 @@ function makeDoc(pdf, doc, task, id, imagesDir, renderer) {
  * Page blocks with each `figure` mark of page-blocks made a picture (an image
  * block, alt the caption) or, without a canvas, past MAX_PAGE_FIGURES or the
  * page's time budget, or when the render fails, a `drawing` line. No `figure`
- * is left; a failure never fails the page.
+ * is left; a failure never fails the page. `retry`: a render failed or the
+ * budget ran out, so another try may draw more (no canvas and the cap do not
+ * change between tries).
  */
 export async function withFigures(doc, n, blocks, { budgetMs = FIGURE_PAGE_MS, renderMs = FIGURE_RENDER_MS } = {}) {
   const deadline = Date.now() + budgetMs
   let rendered = 0
+  let retry = false
   const out = []
   for (const block of blocks) {
     if (block.kind !== 'figure') {
@@ -323,12 +331,13 @@ export async function withFigures(doc, n, blocks, { budgetMs = FIGURE_PAGE_MS, r
         picture = await doc.renderFigure(n, block.region, { timeoutMs: Math.min(renderMs, left), index: rendered })
       } catch {
         picture = null
+        retry = true
       }
       rendered++
-    }
+    } else if (rendered < MAX_PAGE_FIGURES) retry = true
     out.push(picture ? { kind: 'image', file: picture.file, width: picture.width, height: picture.height, alt: block.alt } : { kind: 'drawing', alt: block.alt })
   }
-  return out
+  return { blocks: out, retry }
 }
 
 // ---------------------------------------------------------------- images

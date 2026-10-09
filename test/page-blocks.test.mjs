@@ -796,7 +796,8 @@ describe('figures drawn with paths', () => {
   })
 
   test('the region never reaches the line above or the caption', () => {
-    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings: [box(60, 400, 420, 760)] })
+    // The drawing runs up to just under the line's descenders and below the caption: it is cut at both.
+    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings: [box(60, 400, 420, 683)] })
     const { region } = blocks.find(b => b.kind === 'figure')
     assert.ok(region.top <= 687 - 3, `top ${region.top}`)
     assert.ok(region.bottom >= 540 + 10, `bottom ${region.bottom}`)
@@ -835,12 +836,71 @@ describe('figures drawn with paths', () => {
   test('a running head dropped from the text still bounds the region', () => {
     const items = [item('Chapter One · Running Head', { y: 740 }), ...lines(['Рис. 1.1. Пример', 'Text below.'], { top: 580 })]
     const profile = { ...PROFILE, headers: [{ y: 740, text: 'Chapter One · Running Head' }] }
-    const blocks = pageBlocks(items, [], profile, { top: 792, bottom: 0, drawings: [box(100, 600, 400, 760)] })
+    // The drawing reaches into the head's descenders (738 > 740 − 3): the region still stops below the head.
+    const blocks = pageBlocks(items, [], profile, { top: 792, bottom: 0, drawings: [box(100, 600, 400, 738)] })
     assert.deepEqual(
       blocks.map(b => b.kind),
       ['figure', 'caption', 'para'],
     )
     assert.ok(blocks[0].region.top <= 740 - 3)
+  })
+
+  test('a drawing that reaches up beside the line above (a QR code by a link) is left out, touching parts too', () => {
+    // A short line at 687 with a QR code at its right (as on the test book's p. 27): the modules reaching above its
+    // baseline lie wholly above the band (which stops at the descenders, 684); the ones touching them are in it.
+    const qr = [box(300, 685, 310, 692), box(311, 684.5, 321, 690), box(300, 676, 310, 683.5), box(311, 671, 321, 679)]
+    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings: [...qr, box(100, 560, 250, 640)] })
+    const { region } = blocks.find(b => b.kind === 'figure')
+    assert.deepEqual(region, { left: 97, bottom: 557, right: 253, top: 643 })
+  })
+
+  test('a figure one line of text tall (the test book p. 27: a tokenized sentence) is still a figure; a rule alone is not', () => {
+    const items = [...lines(['First paragraph line one runs long.', 'and ends here.'], { top: 700 }), ...lines(['Figure 1. Tokens.', 'Text below.'], { top: 650 })]
+    // Band 684..660; the drawing 668..678 is under two lines tall.
+    const blocks = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings: [box(100, 668, 300, 678)] })
+    assert.deepEqual(blocks.find(b => b.kind === 'figure')?.region, { left: 97, bottom: 665, right: 303, top: 681 })
+    const ruled = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings: [box(100, 672, 300, 672.5)] })
+    assert.ok(!ruled.some(b => b.kind === 'figure'))
+  })
+
+  test('a small raster inside a vector figure is part of the figure: the band is rendered, the icon not shown alone', () => {
+    // The test book's p. 34: a 52×60 icon among boxes and arrows drawn with paths.
+    const icon = { file: '/p/icon.rgb', width: 52, height: 60, x: 120, y: 640, w: 26, h: 30 }
+    const drawings = [box(100, 560, 400, 660), box(120, 610, 146, 640)]
+    const blocks = pageBlocks(page(), [icon], PROFILE, { top: 792, bottom: 0, drawings })
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['para', 'figure', 'caption', 'para'],
+    )
+    assert.deepEqual(blocks[1].region, { left: 97, bottom: 557, right: 403, top: 663 })
+  })
+
+  test('labels set as text inside the drawing do not cut the figure down: they go into it', () => {
+    const items = [
+      ...lines(['First paragraph line one runs long.', 'and ends here.'], { top: 700 }),
+      item('Model', { x: 150, y: 640 }),
+      item('Prompt', { x: 300, y: 620 }),
+      ...lines(['Figure 1. A box.', 'Text below the figure.'], { top: 540 }),
+    ]
+    const drawings = [box(120, 630, 250, 655), box(280, 610, 400, 635), box(100, 560, 400, 600)]
+    const blocks = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings })
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['para', 'figure', 'caption', 'para'],
+    )
+    assert.deepEqual(blocks[1].region, { left: 97, bottom: 557, right: 403, top: 658 })
+  })
+
+  test('a code line above a figure is never taken for a label', () => {
+    const items = [
+      ...lines(['First paragraph line one runs long.'], { top: 700 }),
+      item('x = 1', { x: 150, y: 640, mono: true, family: 'monospace' }),
+      ...lines(['Figure 1. A box.', 'Text below the figure.'], { top: 540 }),
+    ]
+    const drawings = [box(120, 630, 250, 655), box(100, 560, 400, 600)]
+    const blocks = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings })
+    assert.ok(blocks.some(b => b.kind === 'code'))
+    assert.ok(blocks.find(b => b.kind === 'figure').region.top <= 640 - 3)
   })
 
   test('a rule standing apart above or below the drawing (under a running head) is not part of the figure', () => {

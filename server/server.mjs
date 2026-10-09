@@ -578,16 +578,18 @@ async function pageOf(book, n) {
   if (cached && cached.blocks.every(block => block.kind !== 'image' || fs.existsSync(block.file))) return cached
   return shared(extracting, key, async () => {
     let answer
+    let retry = false
     try {
       const { items, images, drawings, width, height, top, bottom } = await doc.pageContent(n)
       // Figures drawn with paths are rendered into pictures where the canvas is installed, else shown as a line.
-      const blocks = await withFigures(doc, n, pageBlocks(items, images, book.textProfile, { top, bottom, pageNumber: n, drawings }))
-      answer = { page: n, pages: doc.pages, blocks, scanned: isScanned(items, images, width, height) }
+      const figured = await withFigures(doc, n, pageBlocks(items, images, book.textProfile, { top, bottom, pageNumber: n, drawings }))
+      answer = { page: n, pages: doc.pages, blocks: figured.blocks, scanned: isScanned(items, images, width, height) }
+      retry = figured.retry
     } catch (error) {
       answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: errorLine(error) }
     }
-    // A failure may pass (a full disk, a folder gone): the next request tries again.
-    if (answer.error) return answer
+    // A failure may pass (a full disk, a folder gone, a figure that rendered too slowly): the next request tries again.
+    if (answer.error || retry) return answer
     pageCache.set(key, answer)
     if (pageCache.size > PAGE_CACHE_MAX) pageCache.delete(pageCache.keys().next().value)
     return answer

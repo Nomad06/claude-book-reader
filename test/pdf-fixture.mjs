@@ -116,9 +116,10 @@ export function buildScannedPdf({ width = 612, height = 792, pixels = 32, copies
  * (150..350 × 500..620) inside a stroked black frame (120..380 × 480..640), a
  * clipping rectangle that paints nothing, then "Figure 1. A box." and a line
  * below. Helvetica, 10 pt. `strokes` adds that many wide curves across the box:
- * a figure slow to render; `skew` slants the text (a fake italic).
+ * a figure slow to render; `skew` slants the text (a fake italic); `userUnit`
+ * sets the page's /UserUnit.
  */
-export function buildDrawingPdf({ width = 612, height = 792, strokes = 0, skew = 0 } = {}) {
+export function buildDrawingPdf({ width = 612, height = 792, strokes = 0, skew = 0, userUnit = null } = {}) {
   const objects = []
   const add = body => (objects.push(body), objects.length)
   const catalogId = add('')
@@ -136,7 +137,7 @@ export function buildDrawingPdf({ width = 612, height = 792, strokes = 0, skew =
   ].join('\n')
   const contentId = add(`<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`)
   const pageId = add(
-    `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+    `<< /Type /Page /Parent ${pagesId} 0 R${userUnit ? ` /UserUnit ${userUnit}` : ''} /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`,
   )
   objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`
   objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`

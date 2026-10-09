@@ -49,15 +49,20 @@ const MAX_SIZE = 1000
 const MAX_INDENT = 80
 const MAX_BLANK_LINES = 5
 const MAX_IMAGES = 200
-const MAX_DRAWINGS = 5000
+export const MAX_DRAWINGS = 5000 // drawing boxes of one page (pdf-source reports no more)
 const MAX_FIGURES = 20 // figure marks on one page; the server renders a few and shows the rest as a line
 
-// A figure drawn with paths sits between the line above its caption and the caption: at least this many
-// body lines tall, with a drawing in it. The region keeps clear of both lines' glyphs.
+// A figure drawn with paths sits between the line above its caption and the caption, a band at least this many
+// body lines tall with a drawing at least one line tall in it. The region keeps clear of both lines' glyphs.
 const FIGURE_MIN_LINES = 2
 const FIGURE_PAD = 3 // pt around the drawing
 const DESCENT = 0.3 // × size below a baseline
 const RULE_HEIGHT = 1.5 // pt: a box no taller is a rule
+const TOUCH = 2 // pt: drawings this close are one piece (a QR code's modules)
+const MAX_TOUCH_BOXES = 1000 // above this many boxes in a band, pieces are not followed box to box
+const MAX_LABELS = 12 // text lines taken into one figure as its labels
+const LABEL_WIDTH = 0.5 // × the text column: a label is a short line
+const RASTER_SHARE = 0.25 // a picture covering less of the drawn band is a part of a figure drawn with paths
 
 /** Items with finite position and a usable size; width and text made safe; at most MAX_ITEMS. */
 function sane(items) {
@@ -242,16 +247,17 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
   // Every line with text, running heads too: a figure's region stops below whatever is printed above it.
   const printed = linesOf(items).filter(line => cleanRun(line.text).trim() !== '')
   const kept = printed.filter(line => !isHeader(line, headers))
-  const boxes = saneBoxes(drawings)
-  let figures = 0
   markContents(kept)
   const lines = withoutRunning(kept, { top, bottom, pageNumber, body, folioOffset: profile?.folioOffset })
+  const shownImages = images.filter(img => img && Number.isFinite(img.y)).slice(0, MAX_IMAGES)
+  const plan = planFigures(lines, printed, saneBoxes(drawings), shownImages, body, top)
   const frame = { left: lines.reduce((m, l) => Math.min(m, l.x), Infinity), right: maxOf(lines, l => l.right) }
   const levelOf = tocLevels(lines, frame.left)
   const pitch = pitchOf(lines, body)
   const isBodySize = line => Math.abs(line.size - body) < 0.5
   const headingSizes = [...new Set(lines.filter(l => !l.toc && l.size >= body * HEADING_RATIO).map(l => round(l.size)))].sort((a, b) => b - a)
-  const pending = images.filter(img => img && Number.isFinite(img.y)).slice(0, MAX_IMAGES).sort((a, b) => b.y - a.y)
+  // A small picture inside a figure drawn with paths is shown as part of the rendered figure, not alone.
+  const pending = shownImages.filter(img => !plan.taken.has(img)).sort((a, b) => b.y - a.y)
   const blocks = []
   let open = null // { kind: 'para' | 'list' | 'code', ... }
   let prev = null
@@ -278,7 +284,14 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
   }
 
   for (const [i, line] of lines.entries()) {
+    // A figure's text labels are in its picture.
+    if (plan.absorbed.has(line)) continue
     placeImagesAbove(line.y)
+    const figure = plan.at.get(line)
+    if (figure) {
+      flush()
+      blocks.push(figure)
+    }
     const text = line.text.trim()
     const gap = prev ? prev.y - line.y : 0
     const lineHeight = line.size * 1.2
@@ -310,17 +323,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
       blocks.push({ kind: 'heading', level: Math.min(3, headingSizes.indexOf(round(line.size)) + 1), runs: runsOf(line.items) })
     } else if (CAPTION.test(text)) {
       flush()
-      const runs = runsOf(line.items)
-      // A figure caption with no picture right above it: the drawing above, if any, is the figure.
-      const upright = line.items.every(it => it.upright !== false)
-      if (FIGURE_CAPTION.test(text) && upright && blocks.at(-1)?.kind !== 'image' && figures < MAX_FIGURES) {
-        const region = figureRegion(line, printed, boxes, body, top)
-        if (region) {
-          figures++
-          blocks.push({ kind: 'figure', alt: runs.map(r => r.text).join('').slice(0, 80), region })
-        }
-      }
-      blocks.push({ kind: 'caption', runs })
+      blocks.push({ kind: 'caption', runs: runsOf(line.items) })
     } else if (LIST_MARK.test(text)) {
       flush()
       open = start('list', line, { markerX: line.x })
@@ -372,26 +375,99 @@ function saneBoxes(drawings) {
   return out
 }
 
+const isRule = b => b.top - b.bottom <= RULE_HEIGHT
+
 /**
- * Where a figure drawn with paths sits above `caption`: from below the nearest
- * printed line above (or the page's top edge) down to the caption, cut to the
- * drawings in that band with FIGURE_PAD around them; null when the band is
- * under FIGURE_MIN_LINES body lines tall or has no drawing in it.
+ * The figures drawn with paths on the page: for each figure caption (set
+ * upright, at most MAX_FIGURES), the `figure` mark to put before it (`at`), the
+ * text lines that are its labels (`absorbed`: drawn in the picture, not as
+ * text) and the small pictures inside it (`taken`: likewise).
  */
-function figureRegion(caption, printed, boxes, body, pageTop) {
-  const above = printed.filter(l => l.y > caption.y + 0.5 * caption.size).reduce((low, l) => (!low || l.y < low.y ? l : low), null)
+function planFigures(lines, printed, boxes, images, body, pageTop) {
+  const plan = { at: new Map(), absorbed: new Set(), taken: new Set() }
+  if (boxes.length === 0) return plan
+  const column = maxOf(lines, l => l.right) + maxOf(lines, l => -l.x)
+  const plain = line => !line.mono && !line.toc && line.size < body * HEADING_RATIO
+  const isCaption = line => plain(line) && FIGURE_CAPTION.test(line.text.trim()) && line.items.every(it => it.upright !== false)
+  // A label: a short plain line with a drawing (not a rule) behind or around it.
+  const isLabel = line =>
+    plain(line) &&
+    !CAPTION.test(line.text.trim()) &&
+    line.right - line.x <= LABEL_WIDTH * column &&
+    boxes.some(b => !isRule(b) && b.left < line.right && b.right > line.x && b.bottom < line.y + line.size && b.top > line.y - DESCENT * line.size)
+  for (const [i, caption] of lines.entries()) {
+    if (plan.at.size >= MAX_FIGURES) break
+    if (plan.absorbed.has(caption) || !isCaption(caption)) continue
+    const labels = []
+    for (let j = i - 1; j >= 0 && labels.length < MAX_LABELS && !plan.absorbed.has(lines[j]) && isLabel(lines[j]); j--) labels.push(lines[j])
+    const highest = labels.at(-1) ?? caption
+    const above = printed.filter(l => l.y > highest.y + 0.5 * highest.size).reduce((low, l) => (!low || l.y < low.y ? l : low), null)
+    const found = figureRegion(caption, above, boxes, images, body, pageTop)
+    if (!found) continue
+    const alt = runsOf(caption.items)
+      .map(r => r.text)
+      .join('')
+      .slice(0, 80)
+    plan.at.set(caption, { kind: 'figure', alt, region: found.region })
+    for (const label of labels) plan.absorbed.add(label)
+    for (const img of found.taken) plan.taken.add(img)
+  }
+  return plan
+}
+
+/**
+ * Where a figure drawn with paths sits above `caption`: from below the line
+ * `above` (or the page's top edge) down to the caption, cut to the drawings in
+ * that band with FIGURE_PAD around them, and the pictures inside it. Left out:
+ * drawings reaching up beside the line above (a QR code by a link) with every
+ * piece touching them, and lone rules. Null when the band is under
+ * FIGURE_MIN_LINES body lines tall, has no drawing a line tall, or holds a picture covering
+ * RASTER_SHARE of the drawn band or more (then the picture is the figure).
+ */
+function figureRegion(caption, above, boxes, images, body, pageTop) {
   const ceiling = above ? above.y - DESCENT * above.size : Number.isFinite(pageTop) ? pageTop : Infinity
   const floor = caption.y + caption.size
-  if (ceiling - floor < FIGURE_MIN_LINES * 1.2 * body) return null
-  const inside = withoutLoneRules(
-    boxes.filter(b => b.top >= floor && b.bottom <= ceiling),
-    1.2 * body,
-  )
+  const tall = FIGURE_MIN_LINES * 1.2 * body
+  if (ceiling - floor < tall) return null
+  let band = boxes.filter(b => b.top >= floor && b.bottom <= ceiling)
+  // Beside the line above: boxes reaching above its baseline, up to its top (they may lie wholly above the band).
+  if (above) band = withoutReaching(band, boxes.filter(b => b.top > above.y && b.bottom > ceiling && b.bottom < above.y + above.size), above.y, floor + 1.2 * body)
+  const inside = withoutLoneRules(band, 1.2 * body)
   if (inside.length === 0) return null
   const top = Math.min(ceiling, maxOf(inside, b => b.top) + FIGURE_PAD)
   const bottom = Math.max(floor, -maxOf(inside, b => -b.bottom) - FIGURE_PAD)
-  if (top - bottom < FIGURE_MIN_LINES * 1.2 * body) return null
-  return { left: -maxOf(inside, b => -b.left) - FIGURE_PAD, bottom, right: maxOf(inside, b => b.right) + FIGURE_PAD, top }
+  // The drawing itself may be a line of text tall (a sentence drawn as tokens); a rule alone is less.
+  if (top - bottom < 1.2 * body) return null
+  const left = -maxOf(inside, b => -b.left) - FIGURE_PAD
+  const right = maxOf(inside, b => b.right) + FIGURE_PAD
+  const taken = images.filter(img => img.y >= floor && img.y - img.h <= ceiling)
+  const pictured = taken.reduce((sum, img) => sum + (Number.isFinite(img.w * img.h) ? Math.max(0, img.w * img.h) : Infinity), 0)
+  if (taken.length > 0 && pictured >= RASTER_SHARE * (right - left) * (top - bottom)) return null
+  return { region: { left, bottom, right, top }, taken }
+}
+
+/**
+ * The band's boxes without those reaching above `baseline` and every box
+ * touching them, piece by piece, starting also from `beside` (boxes by the line,
+ * wholly above the band). Up to MAX_TOUCH_BOXES boxes; past that only the
+ * reaching boxes go. A box from above the baseline down to `low` frames the
+ * text and the figure together: it stays and links nothing.
+ */
+function withoutReaching(band, beside, baseline, low) {
+  const frames = new Set(band.filter(b => b.top > baseline && b.bottom <= low))
+  const gone = new Set([...beside, ...band.filter(b => b.top > baseline && !frames.has(b))])
+  if (gone.size === 0 || band.length + beside.length > MAX_TOUCH_BOXES) return band.filter(b => !gone.has(b))
+  const touch = (a, b) => b.left <= a.right + TOUCH && b.right >= a.left - TOUCH && b.bottom <= a.top + TOUCH && b.top >= a.bottom - TOUCH
+  const queue = [...gone]
+  while (queue.length > 0) {
+    const a = queue.pop()
+    for (const b of band) {
+      if (gone.has(b) || frames.has(b) || !touch(a, b)) continue
+      gone.add(b)
+      queue.push(b)
+    }
+  }
+  return band.filter(b => !gone.has(b))
 }
 
 /**
@@ -400,7 +476,6 @@ function figureRegion(caption, printed, boxes, body, pageTop) {
  * under a running head or above footnotes, not an edge of the figure.
  */
 function withoutLoneRules(boxes, gap) {
-  const isRule = b => b.top - b.bottom <= RULE_HEIGHT
   // Sorted by top, the next box reaches highest of the rest; sorted by bottom, lowest.
   const byTop = [...boxes].sort((a, b) => b.top - a.top)
   let first = 0

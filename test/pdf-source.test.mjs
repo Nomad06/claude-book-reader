@@ -343,7 +343,8 @@ describe('figures drawn with paths', () => {
   test('with canvas, the figure is rendered into a picture with the caption as alt', async t => {
     if (!(await loadCanvas())) return t.skip(NO_CANVAS)
     const { doc, blocks } = await figureBlocks(source, 'figure.pdf')
-    const out = await withFigures(doc, 1, blocks)
+    const { blocks: out, retry } = await withFigures(doc, 1, blocks)
+    assert.equal(retry, false)
     assert.deepEqual(
       out.map(b => b.kind),
       ['para', 'image', 'caption', 'para'],
@@ -362,47 +363,64 @@ describe('figures drawn with paths', () => {
     const plain = createPdfSource({ vendorDir: VENDOR, imagesDir: path.join(dir, 'pages'), loadCanvas: async () => null })
     try {
       const { doc, blocks } = await figureBlocks(plain, 'nocanvas.pdf')
-      const out = await withFigures(doc, 1, blocks)
+      const { blocks: out, retry } = await withFigures(doc, 1, blocks)
       assert.deepEqual(out[1], { kind: 'drawing', alt: 'Figure 1. A box.' })
       assert.ok(!out.some(b => b.kind === 'figure'))
+      assert.equal(retry, false, 'no canvas is final: the answer may be kept')
     } finally {
       await plain.closeAll()
     }
   })
 
-  test('a render that throws, gives nothing or runs past the page budget leaves drawing lines', async () => {
+  test('a render that throws or runs past the page budget leaves drawing lines, to be tried again', async () => {
     const throwing = { renderFigure: async () => Promise.reject(new Error('boom')) }
-    assert.deepEqual(await withFigures(throwing, 1, [FIGURE]), [{ kind: 'drawing', alt: 'Figure 9. X.' }])
-    const empty = { renderFigure: async () => null }
-    assert.deepEqual(await withFigures(empty, 1, [FIGURE]), [{ kind: 'drawing', alt: 'Figure 9. X.' }])
+    assert.deepEqual(await withFigures(throwing, 1, [FIGURE]), { blocks: [{ kind: 'drawing', alt: 'Figure 9. X.' }], retry: true })
     let calls = 0
     const slow = { renderFigure: async () => (calls++, await new Promise(r => setTimeout(r, 30)), { file: '/f.rgb', width: 40, height: 40 }) }
     const out = await withFigures(slow, 1, [FIGURE, FIGURE, FIGURE], { budgetMs: 20 })
     assert.equal(calls, 1)
     assert.deepEqual(
-      out.map(b => b.kind),
+      out.blocks.map(b => b.kind),
       ['image', 'drawing', 'drawing'],
     )
+    assert.equal(out.retry, true)
+  })
+
+  test('a render with nothing to show (no canvas, too small) is a drawing line to keep', async () => {
+    const empty = { renderFigure: async () => null }
+    assert.deepEqual(await withFigures(empty, 1, [FIGURE]), { blocks: [{ kind: 'drawing', alt: 'Figure 9. X.' }], retry: false })
   })
 
   test(`at most MAX_PAGE_FIGURES (${MAX_PAGE_FIGURES}) figures of a page are rendered`, async () => {
     let calls = 0
     const doc = { renderFigure: async (n, region, { index }) => (calls++, { file: `/f-${index}.rgb`, width: 40, height: 40 }) }
-    const out = await withFigures(doc, 1, Array.from({ length: MAX_PAGE_FIGURES + 2 }, () => FIGURE))
+    const { blocks: out, retry } = await withFigures(doc, 1, Array.from({ length: MAX_PAGE_FIGURES + 2 }, () => FIGURE))
+    assert.equal(retry, false, 'the cap is the same on every try')
     assert.equal(calls, MAX_PAGE_FIGURES)
     assert.deepEqual(out.at(-1), { kind: 'drawing', alt: 'Figure 9. X.' })
     assert.equal(new Set(out.filter(b => b.kind === 'image').map(b => b.file)).size, MAX_PAGE_FIGURES)
   })
 
-  test('a render past its time is cancelled and gives nothing; in time, it gives the picture', async t => {
+  test('a render past its time is cancelled and fails; in time, it gives the picture', async t => {
     if (!(await loadCanvas())) return t.skip(NO_CANVAS)
     // Thousands of wide curves: more than one ~15 ms slice of pdf.js drawing.
     const { doc, blocks } = await figureBlocks(source, 'slow.pdf', { strokes: 8000 })
     const started = Date.now()
-    assert.equal(await doc.renderFigure(1, blocks[1].region, { timeoutMs: 1, index: 0 }), null)
+    await assert.rejects(doc.renderFigure(1, blocks[1].region, { timeoutMs: 1, index: 0 }), /took longer than 1 ms/)
     const spent = Date.now() - started
     const whole = Date.now()
     assert.ok(await doc.renderFigure(1, blocks[1].region, { timeoutMs: 30_000, index: 1 }))
     assert.ok(spent < Date.now() - whole, `cut short: ${spent} ms, whole render ${Date.now() - whole} ms`)
+  })
+
+  test('a page with a /UserUnit is rendered at the same size as without (pdf.js scales its viewport by it)', async t => {
+    if (!(await loadCanvas())) return t.skip(NO_CANVAS)
+    const plain = await figureBlocks(source, 'unit1.pdf')
+    const big = await figureBlocks(source, 'unit50.pdf', { userUnit: 50 })
+    assert.deepEqual(big.blocks[1].region, plain.blocks[1].region)
+    const a = await plain.doc.renderFigure(1, plain.blocks[1].region, { index: 0 })
+    const b = await big.doc.renderFigure(1, big.blocks[1].region, { index: 0 })
+    assert.deepEqual([b.width, b.height], [a.width, a.height])
+    assert.ok((await fs.readFile(b.file)).equals(await fs.readFile(a.file)), 'the same picture')
   })
 })
