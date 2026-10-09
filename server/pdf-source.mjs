@@ -171,7 +171,7 @@ function makeDoc(pdf, doc, task, id, imagesDir) {
     for (const n of numbers) {
       const page = await doc.getPage(n)
       try {
-        out.push(itemsOf(await page.getTextContent(), () => null))
+        out.push({ page: n, items: itemsOf(await page.getTextContent(), () => null) })
       } finally {
         page.cleanup()
       }
@@ -230,8 +230,8 @@ export async function imagesOf(pdf, page, ops, prefix, imagesDir, { waitMs = PAG
     let img = hit.source
     if (typeof img === 'string') {
       const left = deadline - Date.now()
-      if (left <= 0) continue // the budget is spent: inline pictures after it still come, no wait needed
-      img = await imageObject(page, img, left)
+      // Once the budget is spent only pictures pdf.js already holds are taken; inline ones still come.
+      img = left > 0 ? await imageObject(page, img, left) : heldImage(page, img)
     }
     if (!img || !img.data || img.width < MIN_IMAGE_SIDE || img.height < MIN_IMAGE_SIDE) continue
     const rgb = toRgb(img)
@@ -250,8 +250,20 @@ export async function imagesOf(pdf, page, ops, prefix, imagesDir, { waitMs = PAG
 // a `g_` id, and the rest in the page's objs; asking the wrong one never answers.
 // A picture pdf.js never delivers is given up after `waitMs`: what is left of the
 // page's budget, so it cannot hold the page up.
+const objsOf = (page, id) => (id.startsWith('g_') ? page.commonObjs : page.objs)
+
+/** A picture pdf.js has already decoded, without waiting; null otherwise. */
+function heldImage(page, id) {
+  const objs = objsOf(page, id)
+  try {
+    return objs.has(id) ? objs.get(id) : null
+  } catch {
+    return null
+  }
+}
+
 function imageObject(page, id, waitMs) {
-  const objs = id.startsWith('g_') ? page.commonObjs : page.objs
+  const objs = objsOf(page, id)
   return new Promise(resolve => {
     const timer = setTimeout(() => resolve(null), waitMs)
     objs.get(id, img => {

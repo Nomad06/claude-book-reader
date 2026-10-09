@@ -347,15 +347,41 @@ function row(parts, { x = 56.7, y, size = 9.5, ...rest } = {}) {
 
 const body = (texts, top = 579) => lines(texts, { top, x: 56.7, leading: 1.21 })
 
+// The test book prints the PDF's own page number (offset 0), as calibrate learns from its samples.
+const FOLIOS = { ...PROFILE, folioOffset: 0 }
+
+describe('folio offset', () => {
+  const page = (n, printed) => ({
+    page: n,
+    items: [item(`${printed} Глава 2. Знакомство с базовыми моделями`, { y: 613.9, size: 12 }), ...body([`Текст страницы ${'абвг'[n % 4]} достаточно длинный.`])],
+  })
+
+  test('calibrate learns how far the printed folios are from the PDF page numbers', () => {
+    assert.equal(calibrate([page(50, 50), page(80, 80), page(120, 120)]).folioOffset, 0)
+    // front matter counted apart: PDF page 50 prints 38
+    assert.equal(calibrate([page(50, 38), page(80, 68), page(120, 108), page(200, 3)]).folioOffset, -12)
+  })
+
+  test('no offset when the sampled pages disagree, have no folios, or carry no page numbers', () => {
+    assert.equal(calibrate([page(50, 50), page(80, 70), page(120, 101)]).folioOffset, null)
+    assert.equal(calibrate([{ page: 3, items: body(['Только текст.']) }, { page: 9, items: body(['И еще текст.']) }]).folioOffset, null)
+    assert.equal(calibrate([page(50, 50).items, page(80, 80).items]).folioOffset, null)
+    assert.equal(calibrate([]).folioOffset, null)
+  })
+})
+
 describe('running heads by position', () => {
   test('a running head with the folio first or last is dropped on its page, whatever its size', () => {
     const even = [item('36 Глава 1. Основы создания AI-приложений с использованием базовых моделей', { x: 56.7, y: 613.9, size: 12 }), ...body(['AI-приложений и сокращают время их выхода на рынок.'])]
     const odd = [item('Восход AI-инженерии 27', { x: 307.8, y: 613.9, size: 12 }), ...body(['основанная на английском языке, будет чаще предсказывать'])]
     const contents = [...row(['10', ' ', 'Оглавление'], { y: 608.2, size: 12 }), ...body(['Текст страницы.'])]
     for (const [items, n] of [[even, 36], [odd, 27], [contents, 10]]) {
-      assert.deepEqual(pageBlocks(items, [], PROFILE, { ...BOOK, pageNumber: n }).map(b => b.kind), ['para'], `page ${n}`)
-      // The folio need not be the PDF's page number (front matter counts apart): still a running head.
-      assert.deepEqual(pageBlocks(items, [], PROFILE, BOOK).map(b => b.kind), ['para'], `page ${n} without its number`)
+      assert.deepEqual(pageBlocks(items, [], FOLIOS, { ...BOOK, pageNumber: n }).map(b => b.kind), ['para'], `page ${n}`)
+      // The same page counted 12 pages on in the PDF, with that offset learned: still its head.
+      assert.deepEqual(pageBlocks(items, [], { ...FOLIOS, folioOffset: -12 }, { ...BOOK, pageNumber: n + 12 }).map(b => b.kind), ['para'], `page ${n} + 12`)
+      // No offset learned, or a number that is not this page's folio: nothing is dropped by position.
+      assert.equal(pageBlocks(items, [], PROFILE, { ...BOOK, pageNumber: n }).length, 2, `page ${n}, no offset`)
+      assert.equal(pageBlocks(items, [], FOLIOS, { ...BOOK, pageNumber: n + 1 }).length, 2, `page ${n}, other folio`)
     }
     // p21: a section heading right under the running head.
     const section = [
@@ -363,7 +389,7 @@ describe('running heads by position', () => {
       item('Использование примеров кода', { x: 56.7, y: 571.8, size: 20 }),
       ...body(['Материалы к книге можно скачать на сайте.'], 550.4),
     ]
-    assert.deepEqual(pageBlocks(section, [], PROFILE, { ...BOOK, pageNumber: 21 }).map(b => [b.kind, text(b)]), [
+    assert.deepEqual(pageBlocks(section, [], FOLIOS, { ...BOOK, pageNumber: 21 }).map(b => [b.kind, text(b)]), [
       ['heading', 'Использование примеров кода'],
       ['para', 'Материалы к книге можно скачать на сайте.'],
     ])
@@ -377,50 +403,79 @@ describe('running heads by position', () => {
     ]
     const high = [item('ГЛАВА 3', { x: 56.7, y: 625, size: 18 }), ...body(['Текст главы.'], 560)]
     assert.deepEqual(
-      pageBlocks(opening, [], PROFILE, { ...BOOK, pageNumber: 460 }).map(b => [b.kind, b.level, text(b)]),
+      pageBlocks(opening, [], FOLIOS, { ...BOOK, pageNumber: 460 }).map(b => [b.kind, b.level, text(b)]),
       [
         ['heading', 2, 'ГЛАВА 9'],
         ['heading', 1, 'Оптимизация вывода'],
         ['para', undefined, 'Новые модели приходят и уходят, но сохраняет актуальность одна цель.'],
       ],
     )
-    assert.deepEqual(pageBlocks(high, [], PROFILE, { ...BOOK, pageNumber: 3 }).map(b => [b.kind, text(b)]), [
+    assert.deepEqual(pageBlocks(high, [], FOLIOS, { ...BOOK, pageNumber: 3 }).map(b => [b.kind, text(b)]), [
       ['heading', 'ГЛАВА 3'],
       ['para', 'Текст главы.'],
     ])
   })
 
+  // Other layouts (US letter, 11 pt body): a number at the edge of a line is not a folio unless it is this page's.
+  test('titles, parts, orphan lines and table rows with a number at the page edge stay', () => {
+    const LETTER = { top: 792, bottom: 0 }
+    const eleven = { bodySize: 11, headers: [], folioOffset: 0 }
+    const text11 = (texts, top) => lines(texts, { top, x: 72, size: 11, leading: 1.2 })
+    const cases = [
+      ['Chapter 3', [item('Chapter 3', { x: 72, y: 745, size: 14 }), ...text11(['The chapter begins here and runs on.'], 700)], 57],
+      ['1 Introduction', [item('1 Introduction', { x: 72, y: 745, size: 12, font: 'Minion-Bold' }), ...text11(['The chapter begins here and runs on.'], 700)], 9],
+      ['PART 2', [item('PART 2', { x: 260, y: 750, size: 12 }), ...text11(['Text of the part opening.'], 690)], 151],
+      ['models released in 2023', [item('models released in 2023', { x: 72, y: 745, size: 11 }), item('Benchmarks', { x: 72, y: 700, size: 16 }), ...text11(['Text after the heading.'], 670)], 101],
+      ['Total 1234', [...text11(['Region A 600', 'Region B 634'], 120), item('Total 1234', { x: 72, y: 60, size: 11 })], 88],
+    ]
+    for (const [kept, items, n] of cases) {
+      const shown = pageBlocks(items, [], eleven, { ...LETTER, pageNumber: n }).map(text).join(' | ')
+      assert.ok(shown.includes(kept), `${kept} on page ${n}: ${shown}`)
+    }
+  })
+
   test('the first body line is kept even near the top edge, number or not', () => {
-    // A tight top margin: the text starts inside the band, on the normal pitch, with a number at its end.
+    // A tight top margin: the text starts inside the band, on the normal pitch, with this page's number at its end.
     const items = lines(['в отчете за 2024', 'год приводятся такие данные.'], { top: 640, x: 56.7, leading: 1.21 })
-    assert.equal(text(pageBlocks(items, [], PROFILE, { ...BOOK, pageNumber: 2024 })[0]), 'в отчете за 2024 год приводятся такие данные.')
+    assert.equal(text(pageBlocks(items, [], FOLIOS, { ...BOOK, pageNumber: 2024 })[0]), 'в отчете за 2024 год приводятся такие данные.')
   })
 
   test('a folio at the foot is dropped; a footnote at the foot is kept whole', () => {
     const footer = [...body(['Последняя строка текста.'], 120), item('57', { x: 230, y: 30, size: 9 })]
-    assert.deepEqual(pageBlocks(footer, [], PROFILE, { ...BOOK, pageNumber: 57 }).map(text), ['Последняя строка текста.'])
-    assert.deepEqual(pageBlocks(footer, [], PROFILE, BOOK).map(text), ['Последняя строка текста.'])
+    assert.deepEqual(pageBlocks(footer, [], FOLIOS, { ...BOOK, pageNumber: 57 }).map(text), ['Последняя строка текста.'])
+    assert.deepEqual(pageBlocks(footer, [], FOLIOS, { ...BOOK, pageNumber: 58 }).map(text), ['Последняя строка текста.', '57'])
     // p27: a two-line footnote, the second line hanging under the text after the marker.
     const note = [
       ...body(['деляются разработчиками модели.'], 102.7),
       item('1 В других языках, не в английском, один символ кодировки Unicode порой может обо-', { x: 56.7, y: 70.7, size: 9 }),
       item('значаться несколькими токенами.', { x: 65.2, y: 56.7, size: 9 }),
     ]
-    assert.deepEqual(pageBlocks(note, [], PROFILE, { ...BOOK, pageNumber: 27 }).map(text), [
+    assert.deepEqual(pageBlocks(note, [], FOLIOS, { ...BOOK, pageNumber: 27 }).map(text), [
       'деляются разработчиками модели.',
       '1 В других языках, не в английском, один символ кодировки Unicode порой может обозначаться несколькими токенами.',
     ])
   })
 
-  test('a one-line footnote at the foot is not taken for a footer', () => {
-    const items = [...body(['Текст страницы.'], 300), item('3 См. https://oreil.ly/G_HBp', { x: 56.7, y: 56.7, size: 9 })]
-    assert.deepEqual(pageBlocks(items, [], PROFILE, { ...BOOK, pageNumber: 41 }).map(text), ['Текст страницы.', '3 См. https://oreil.ly/G_HBp'])
+  test('a one-line footnote at the foot stays, even when it ends with this page\'s number', () => {
+    const notes = [
+      ['3 См. https://oreil.ly/G_HBp', 9, 41],
+      ['¹See Smith, p. 45', 9, 45],
+      ['* First published in 1999', 9, 1999],
+      ['2 Квантование рассматривается в главе 7', 9.5, 7], // 9.5 pt under 10 pt body
+    ]
+    for (const [note, size, n] of notes) {
+      const items = [...body(['Текст страницы.'], 300), item(note, { x: 56.7, y: 56.7, size })]
+      assert.deepEqual(pageBlocks(items, [], FOLIOS, { ...BOOK, pageNumber: n }).map(text), ['Текст страницы.', note], note)
+    }
   })
 
-  test('hostile page boxes and numbers never throw and drop nothing by position', () => {
+  test('hostile page boxes, numbers and offsets never throw and drop nothing by position', () => {
     const items = [item('36 Running head', { x: 56.7, y: 613.9, size: 12 }), ...body(['Body.'])]
     for (const box of [{ top: NaN, bottom: 0 }, { top: 0, bottom: 660 }, { top: Infinity, bottom: -Infinity }, { top: '660', bottom: null, pageNumber: {} }]) {
-      assert.equal(pageBlocks(items, [], PROFILE, box).length, 2, JSON.stringify(box))
+      assert.equal(pageBlocks(items, [], FOLIOS, { pageNumber: 36, ...box }).length, 2, JSON.stringify(box))
+    }
+    for (const folioOffset of ['0', NaN, 0.5, 1e300, null, {}]) {
+      assert.equal(pageBlocks(items, [], { ...PROFILE, folioOffset }, { ...BOOK, pageNumber: 36 }).length, 2, String(folioOffset))
     }
   })
 })
@@ -438,7 +493,7 @@ describe('contents lines', () => {
   ]
 
   test('each entry is its own toc block: title without the leader, the page, the level from the indent', () => {
-    assert.deepEqual(pageBlocks(p10(), [], PROFILE, { ...BOOK, pageNumber: 10 }), [
+    assert.deepEqual(pageBlocks(p10(), [], FOLIOS, { ...BOOK, pageNumber: 10 }), [
       { kind: 'toc', runs: [{ text: 'Глава 9. Оптимизация вывода' }], page: '460', level: 1 },
       { kind: 'toc', runs: [{ text: 'Основы оптимизации вывода' }], page: '461', level: 2 },
       { kind: 'toc', runs: [{ text: 'Метрики эффективности вывода' }], page: '467', level: 3 },
@@ -448,11 +503,18 @@ describe('contents lines', () => {
     ])
   })
 
+  /** A row whose last item (the page number) ends at `right`, like a contents column. */
+  const ruled = (parts, options, right = 300) => {
+    const items = row(parts, options)
+    items.at(-1).x = right - items.at(-1).width
+    return items
+  }
+
   test('ellipses, middle dots and spaced dots are leaders too; bold stays on the title', () => {
     const items = [
-      ...row(['Предисловие', '……………', '13'], { y: 500, font: 'Minion-Bold' }),
-      ...row(['О чем эта книга ', '· · · · · · ·', ' 14'], { y: 487 }),
-      ...row(['Для кого эта книга', ' . . . . . . . ', 'xvii'], { y: 474 }),
+      ...ruled(['Предисловие', '……………', '13'], { y: 500, font: 'Minion-Bold' }),
+      ...ruled(['О чем эта книга ', '· · · · · · ·', ' 14'], { y: 487 }),
+      ...ruled(['Для кого эта книга', ' . . . . . . . ', 'xvii'], { y: 474 }),
     ]
     assert.deepEqual(
       pageBlocks(items, [], PROFILE, BOOK).map(b => [b.kind, b.runs, b.page]),
@@ -497,6 +559,55 @@ describe('contents lines', () => {
         ['para', 'Дальше идет обычный текст.'],
       ],
     )
+  })
+
+  test('a short leader counts only beside another entry ending at the same right edge', () => {
+    const alone = [...body(['Текст страницы.'], 600), ...ruled(['Он ждал', ' . . . . . . ', '12'], { y: 587.9, size: 10 })]
+    assert.deepEqual(pageBlocks(alone, [], PROFILE, BOOK).map(b => b.kind), ['para'])
+    const pair = [...ruled(['Он ждал', ' . . . . . . ', '12'], { y: 600 }), ...ruled(['Она пришла', ' . . . . . . ', '14'], { y: 587 })]
+    assert.deepEqual(pageBlocks(pair, [], PROFILE, BOOK).map(b => [b.kind, b.page]), [['toc', '12'], ['toc', '14']])
+  })
+
+  test('a line ending in an ellipsis and a number stays prose, and so does the line before it', () => {
+    const cases = [
+      ['Each byte holds a value in the range of possible', 'values 0 ... 255'],
+      ['She looked at the door and waited.', 'She counted slowly: 1... 2... 3'],
+      ['And then, as these stories always do, the story', 'goes on . . . i'],
+      ['A loop that prints the numbers once more:', 'for i in range(10): ... 10'],
+    ]
+    for (const [before, line] of cases) {
+      const blocks = pageBlocks(lines([before, line], { top: 600, x: 56.7 }), [], PROFILE, BOOK)
+      assert.deepEqual(blocks.map(b => [b.kind, text(b)]), [['para', `${before} ${line}`]], line)
+    }
+  })
+
+  test('a wrapped entry whose first line looks like a caption, a list item or a heading is one entry', () => {
+    const dots = n => '.'.repeat(n)
+    const figures = [
+      ...row(['Рис. 1.2. Очень длинное описание рисунка, которое не помещается в одну'], { y: 600 }),
+      ...row(['строку и переносится', ' ', dots(60), ' ', '12'], { x: 85, y: 586.8 }),
+      ...row(['Рис. 1.3. Короткое', ' ', dots(80), ' ', '14'], { y: 573.6 }),
+    ]
+    assert.deepEqual(pageBlocks(figures, [], PROFILE, BOOK).map(b => [b.kind, text(b), b.page]), [
+      ['toc', 'Рис. 1.2. Очень длинное описание рисунка, которое не помещается в одну строку и переносится', '12'],
+      ['toc', 'Рис. 1.3. Короткое', '14'],
+    ])
+    const numbered = [
+      ...row(['2. Очень длинное название главы, которое не помещается в одну строку'], { y: 600 }),
+      ...row(['и переносится', ' ', dots(70), ' ', '45'], { x: 70.9, y: 586.8 }),
+    ]
+    assert.deepEqual(pageBlocks(numbered, [], PROFILE, BOOK).map(b => [b.kind, text(b), b.page]), [
+      ['toc', '2. Очень длинное название главы, которое не помещается в одну строку и переносится', '45'],
+    ])
+    const chapter = [
+      ...row(['Глава 3. Очень длинное название главы, которое переносится'], { y: 600, size: 12, font: 'Minion-Bold' }),
+      ...row(['на вторую строку', ' ', dots(50), ' ', '146'], { y: 585, size: 12, font: 'Minion-Bold' }),
+      ...row(['Трудности оценки', ' ', dots(90), ' ', '147'], { x: 70.9, y: 571 }),
+    ]
+    assert.deepEqual(pageBlocks(chapter, [], PROFILE, BOOK).map(b => [b.kind, text(b), b.page]), [
+      ['toc', 'Глава 3. Очень длинное название главы, которое переносится на вторую строку', '146'],
+      ['toc', 'Трудности оценки', '147'],
+    ])
   })
 
   test('prose with an ellipsis, or dots without a page, stays prose', () => {

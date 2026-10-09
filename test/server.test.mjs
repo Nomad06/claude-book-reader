@@ -495,6 +495,7 @@ describe('text mode', () => {
       { title: 'Chapter Two', page: 2, level: 0 },
     ])
     assert.equal(book.textProfile.bodySize, 10)
+    assert.equal(book.textProfile.folioOffset, null) // the fixture prints no page numbers
   })
 
   test('a text page is never reported as scanned, and code is a code block', async () => {
@@ -656,6 +657,47 @@ describe('titles saved by an older version', () => {
       }
       assert.equal((await get('/api/state')).current.title, 'Old[2J Book')
       assert.equal((await get(`/api/books/${id}`)).outline[0].title, 'Ch]0;x One')
+    } finally {
+      await new Promise(resolve => old.once('exit', resolve).kill())
+      await fs.rm(oldData, { recursive: true, force: true })
+    }
+  })
+
+  test('a text profile saved without a folio offset is calibrated again', async () => {
+    const oldData = await fs.mkdtemp(path.join(os.tmpdir(), 'book-reader-old-'))
+    const pdf = path.join(oldData, 'book.pdf')
+    await fs.writeFile(pdf, buildPdf(TEXT))
+    const id = 'bbbbbbbbbbbb'
+    const odd = 'cccccccccccc' // a state file edited by hand: not even an object
+    const saved = {
+      version: 1,
+      currentId: id,
+      books: {
+        [id]: { id, path: pdf, title: 'Book', page: 1, pages: 2, read: [], outline: [], textProfile: { bodySize: 7, headers: [] } },
+        [odd]: { id: odd, path: pdf, title: 'Odd', page: 1, pages: 2, read: [], outline: [], textProfile: 'x' },
+      },
+      settings: {},
+    }
+    await fs.writeFile(path.join(oldData, 'state.json'), JSON.stringify(saved))
+    const oldPort = await freePort()
+    const old = spawn(process.execPath, [SERVER, '--port', String(oldPort), '--data', oldData, '--no-launch'], { stdio: 'ignore' })
+    try {
+      const get = async urlPath => {
+        for (let i = 0; i < 100; i++) {
+          try {
+            const res = await fetch(`http://127.0.0.1:${oldPort}${urlPath}`)
+            if (res.ok) return await res.json()
+          } catch {}
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+        throw new Error('old-state server did not start')
+      }
+      assert.equal((await get(`/api/books/${id}/page/1`)).page, 1)
+      const { textProfile } = await get(`/api/books/${id}`)
+      assert.equal(textProfile.folioOffset, null)
+      assert.equal(textProfile.bodySize, 10)
+      assert.equal((await get(`/api/books/${odd}/page/1`)).page, 1)
+      assert.equal((await get(`/api/books/${odd}`)).textProfile.bodySize, 10)
     } finally {
       await new Promise(resolve => old.once('exit', resolve).kill())
       await fs.rm(oldData, { recursive: true, force: true })

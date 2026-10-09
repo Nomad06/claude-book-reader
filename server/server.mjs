@@ -608,7 +608,8 @@ async function fillBook(book, doc) {
     }
     changed = true
   }
-  if (!book.textProfile) {
+  // A profile saved before the folio offset existed is calibrated again: without it no running head is dropped.
+  if (typeof book.textProfile !== 'object' || book.textProfile === null || !('folioOffset' in book.textProfile)) {
     let profile
     try {
       profile = calibrate(await doc.samples(12))

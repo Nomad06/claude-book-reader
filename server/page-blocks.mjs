@@ -18,9 +18,10 @@ const RUNNING_MAX_RATIO = 1.35 // × body size: a head may be set a little large
 const RUNNING_MAX_CHARS = 120
 const RUNNING_GAP = 2 // × the smaller line height of it and its neighbour: a head stands apart from the text
 const FOLIO = /^\d{1,4}$/
-// A footnote: a number, a space, text smaller than the body.
-const NOTE_MARK = /^\d{1,3}\s+\S/
-const NOTE_RATIO = 0.95
+// A footnote: a mark (a number and a space, superscript digits, * † ‡ §), then text smaller than the body.
+const NOTE_MARK = /^(?:\d{1,3}\s+|[¹²³⁴⁵⁶⁷⁸⁹⁰]+\s*|[*†‡§]+\s*)\S/
+const NOTE_RATIO = 0.96 // 9.5 pt under 10 pt body is small; 9.96 pt is body text
+const isNote = (text, line, body) => NOTE_MARK.test(text) && line.size <= NOTE_RATIO * body
 // Indented body lines set this much wider apart than the page's own line pitch are separate items
 // (list items whose bullets are drawn, table rows); prose at the margin keeps the fixed rule, since
 // a line with inline math may sit a little apart from its neighbours.
@@ -28,6 +29,11 @@ const PITCH_SPLIT = 1.2
 // A contents line: a title, a leader (dots, middle dots, ellipses, spaced or not), the page it points at.
 const PAGE_AT_END = /(\d{1,4}(?: \d{1,3})?|[ivxlcdm]{1,8})\s*$/ // "1 91": pdf.js may split the number
 const LEADER_MARK = /[.·∙…]/
+// A leader's strength counts dots, an ellipsis as three. A strong leader is a contents line on its
+// own; a weak one only beside another leader line ending at the same right edge (a column of pages);
+// anything less ("1... 2... 3", "values 0 ... 255") is prose.
+const STRONG_LEADER = 12
+const WEAK_LEADER = 6
 
 const round = n => Math.round(n * 2) / 2
 
@@ -111,23 +117,50 @@ function joinItems(items) {
 
 // ---------------------------------------------------------------- calibration
 
-/** Sampled pages → the body size and the running header/footer lines to drop. */
+/**
+ * Sampled pages → the body size, the running header/footer lines to drop, and
+ * the folio offset: printed page number − PDF page number, when the sampled
+ * pages agree on it (null when they do not, or carry no page numbers). A sample
+ * is `{ page, items }`, or just its items.
+ */
 export function calibrate(samples) {
   const sizes = new Map()
   const seenOn = new Map()
-  for (const items of samples) {
+  const offsets = new Map()
+  let numbered = 0 // sampled pages with a number at an end of their top or bottom line
+  for (const sample of samples) {
+    const items = Array.isArray(sample) ? sample : (sample?.items ?? [])
     for (const it of sane(items)) {
       const s = round(it.size)
       sizes.set(s, (sizes.get(s) ?? 0) + it.text.length)
     }
     const onThisPage = new Set()
-    for (const line of linesOf(items)) {
+    const lines = linesOf(items)
+    for (const line of lines) {
       const key = headerKey(line)
       if (!key || onThisPage.has(key)) continue
       onThisPage.add(key)
       seenOn.set(key, (seenOn.get(key) ?? 0) + 1)
     }
+    const page = Array.isArray(sample) ? null : sample?.page
+    if (!Number.isInteger(page)) continue
+    const found = new Set()
+    const shown = lines.filter(line => cleanRun(line.text).trim() !== '')
+    for (const line of new Set([shown[0], shown.at(-1)])) {
+      for (const n of edgeNumbers(line)) found.add(n - page)
+    }
+    if (found.size > 0) numbered++
+    for (const offset of found) offsets.set(offset, (offsets.get(offset) ?? 0) + 1)
   }
+  let folioOffset = null
+  let agree = 0
+  for (const [offset, n] of offsets) {
+    if (n > agree) {
+      agree = n
+      folioOffset = offset
+    }
+  }
+  if (agree < 2 || agree * 2 < numbered || !saneOffset(folioOffset)) folioOffset = null
   let bodySize = 10
   let best = -1
   for (const [s, n] of sizes) {
@@ -145,7 +178,19 @@ export function calibrate(samples) {
       headers.push({ y: Number(key.slice(0, at)), text: key.slice(at + 1) })
     }
   }
-  return { bodySize, headers }
+  return { bodySize, headers, folioOffset }
+}
+
+const MAX_FOLIO_OFFSET = 100000
+const saneOffset = n => Number.isInteger(n) && Math.abs(n) <= MAX_FOLIO_OFFSET
+
+/** The 1–4 digit numbers at either end of a short line: where a folio is printed. */
+function edgeNumbers(line) {
+  if (!line) return []
+  const text = cleanRun(line.text).trim()
+  if (text === '' || text.length > RUNNING_MAX_CHARS) return []
+  const words = text.replace(/[|·•–—]/g, ' ').trim().split(/\s+/)
+  return [...new Set([words[0], words.at(-1)])].filter(w => FOLIO.test(w)).map(Number)
 }
 
 function headerKey(line) {
@@ -167,15 +212,16 @@ export function isScanned(items, images, width, height) {
 
 /**
  * `top`/`bottom` are the page box's edges in the items' coordinates and
- * `pageNumber` the page's number in the PDF: with them, running heads and
- * folios are dropped by position on every page, not only those calibrated.
+ * `pageNumber` the page's number in the PDF: with them and the profile's
+ * `folioOffset`, the running head and folio that print this page's number are
+ * dropped by position on every page, not only those calibrated.
  */
 export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, top, bottom, pageNumber } = {}) {
   const body = profile?.bodySize ?? 10
   const headers = profile?.headers ?? []
   const kept = linesOf(items).filter(line => cleanRun(line.text).trim() !== '' && !isHeader(line, headers))
-  for (const line of kept) line.toc = line.mono ? null : splitLeader(cleanRun(line.text))
-  const lines = withoutRunning(kept, { top, bottom, pageNumber, body })
+  markContents(kept)
+  const lines = withoutRunning(kept, { top, bottom, pageNumber, body, folioOffset: profile?.folioOffset })
   const frame = { left: lines.reduce((m, l) => Math.min(m, l.x), Infinity), right: maxOf(lines, l => l.right) }
   const levelOf = tocLevels(lines, frame.left)
   const pitch = pitchOf(lines, body)
@@ -193,6 +239,12 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
     open = null
   }
   const start = (kind, line, extra) => ({ kind, items: [...line.items], minX: line.x, right: line.right, size: line.size, rows: 1, ...extra })
+  // Right above a contents line, at the page's start or after a heading or an entry: the first line of its title.
+  const startsEntry = (line, next) => {
+    if (line.toc || line.mono || !next?.toc) return false
+    const before = open ? open.kind : blocks.at(-1)?.kind
+    return (!before || before === 'toc' || before === 'heading') && wrapsInto(line, next, line.y - next.y)
+  }
   const placeImagesAbove = y => {
     while (pending.length > 0 && (y === null || pending[0].y >= y)) {
       flush()
@@ -201,7 +253,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
     }
   }
 
-  for (const line of lines) {
+  for (const [i, line] of lines.entries()) {
     placeImagesAbove(line.y)
     const text = line.text.trim()
     const gap = prev ? prev.y - line.y : 0
@@ -217,7 +269,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
       open.lines.push({ x: line.x, text })
     } else if (line.toc) {
       // A title that wrapped before its leader: the line or two just above, as wide as the entry, join it.
-      if (open?.titleFirst && open.rows <= 2 && gap <= 1.5 * lineHeight && line.x >= open.minX - 1 && Math.abs(open.size - line.size) < 0.5 && open.right >= line.right - 0.35 * (line.right - open.minX)) {
+      if (open?.titleFirst && open.rows <= 2 && wrapsInto({ x: open.minX, right: open.right, size: open.size }, line, gap)) {
         joinLine(open, line)
         blocks.push(tocBlock(open.items, levelOf(open.minX)))
         open = null
@@ -225,6 +277,10 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
         flush()
         blocks.push(tocBlock(line.items, levelOf(line.x)))
       }
+    } else if (startsEntry(line, lines[i + 1])) {
+      // The first line of a wrapped entry, whatever it looks like ("Рис. 1.2. …", "2. …", a large chapter entry).
+      flush()
+      open = start('para', line, { titleFirst: true })
     } else if (line.size >= body * HEADING_RATIO) {
       flush()
       blocks.push({ kind: 'heading', level: Math.min(3, headingSizes.indexOf(round(line.size)) + 1), runs: runsOf(line.items) })
@@ -234,7 +290,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
     } else if (LIST_MARK.test(text)) {
       flush()
       open = start('list', line, { markerX: line.x })
-    } else if (NOTE_MARK.test(text) && line.size < NOTE_RATIO * body) {
+    } else if (isNote(text, line, body)) {
       flush()
       open = start('para', line, { note: true })
     } else if (
@@ -318,13 +374,16 @@ function pitchOf(lines, body) {
 /**
  * The lines without the running head at the top and the folio line at the foot:
  * the outermost line in its band, apart from the text, not much larger than it,
- * short, with a page number at either end (the PDF's own number, or any). At the
- * foot a small line starting with a number is a footnote and stays.
+ * short, with this page's printed number (PDF page + the calibrated folio
+ * offset) at either end. No offset learned, no line dropped by position: a
+ * number at the edge of a line is otherwise as likely a title's, a table's or a
+ * footnote's. At the foot a small line opening with a note mark stays.
  */
-function withoutRunning(lines, { top, bottom, pageNumber, body }) {
+function withoutRunning(lines, { top, bottom, pageNumber, body, folioOffset }) {
   if (typeof top !== 'number' || typeof bottom !== 'number' || !Number.isFinite(top) || !Number.isFinite(bottom) || top <= bottom) return lines
+  if (!Number.isInteger(pageNumber) || pageNumber < 1 || !saneOffset(folioOffset) || pageNumber + folioOffset < 1) return lines
+  const folio = String(pageNumber + folioOffset)
   const band = RUNNING_BAND * (top - bottom)
-  const folio = Number.isInteger(pageNumber) && pageNumber > 0 ? String(pageNumber) : null
   const first = lines[0]
   const last = lines.at(-1)
   const drop = new Set()
@@ -337,37 +396,60 @@ function isRunning(line, next, edge, body, folio) {
   const text = cleanRun(line.text).trim()
   if (line.mono || line.toc || text.length > RUNNING_MAX_CHARS || line.size > RUNNING_MAX_RATIO * body) return false
   if (next && Math.abs(line.y - next.y) < RUNNING_GAP * 1.2 * Math.min(line.size, next.size)) return false
-  const words = text.replace(/[|·•–—]/g, ' ').trim().split(/\s+/)
-  const head = words[0]
-  const tail = words.at(-1)
-  if (folio && (head === folio || tail === folio)) return true
-  if (edge === 'foot' && words.length > 1 && NOTE_MARK.test(text) && line.size < NOTE_RATIO * body) return false
-  return FOLIO.test(head) || FOLIO.test(tail)
+  if (edge === 'foot' && isNote(text, line, body)) return false
+  return edgeNumbers(line).includes(Number(folio))
 }
 
 // ---------------------------------------------------------------- contents lines
 
 /**
- * A contents line's title (untrimmed, from the line's start) and page, or null.
- * The leader is three dots or more, or two ellipses. Read back from the line's
- * end, so a hostile line of dots costs linear time.
+ * Marks each line's `toc` (title and page) when it is a contents line: a strong
+ * leader on its own, a weak one only when another leader line on the page ends
+ * at the same right edge (within 1 pt).
+ */
+function markContents(lines) {
+  const rights = new Map()
+  for (const line of lines) {
+    line.toc = line.mono ? null : splitLeader(cleanRun(line.text))
+    if (line.toc) rights.set(Math.round(line.right), (rights.get(Math.round(line.right)) ?? 0) + 1)
+  }
+  for (const line of lines) {
+    if (!line.toc || line.toc.strength >= STRONG_LEADER) continue
+    const r = Math.round(line.right)
+    const beside = (rights.get(r - 1) ?? 0) + (rights.get(r) ?? 0) + (rights.get(r + 1) ?? 0) - 1
+    if (beside < 1) line.toc = null
+  }
+}
+
+/**
+ * A contents line's title (untrimmed, from the line's start), page and leader
+ * strength (dots, an ellipsis as three), or null when the leader is weaker than
+ * WEAK_LEADER. Read back from the line's end, so a hostile line of dots costs
+ * linear time.
  */
 function splitLeader(text) {
   const page = PAGE_AT_END.exec(text)
   if (!page) return null
   let i = page.index - 1
-  let marks = 0
-  let ellipsis = false
+  let strength = 0
   for (; i >= 0; i--) {
     const c = text[i]
-    if (LEADER_MARK.test(c)) {
-      marks++
-      if (c === '…') ellipsis = true
-    } else if (!/\s/.test(c)) break
+    if (LEADER_MARK.test(c)) strength += c === '…' ? 3 : 1
+    else if (!/\s/.test(c)) break
   }
-  if (marks < 3 && !(marks >= 2 && ellipsis)) return null
+  if (strength < WEAK_LEADER) return null
   const title = text.slice(0, i + 1)
-  return /\S/.test(title) ? { title, page: page[1].replace(/ /g, '') } : null
+  return /\S/.test(title) ? { title, page: page[1].replace(/ /g, ''), strength } : null
+}
+
+/** A title's first line runs on into the contents line below it: close above, not right of it, as large, about as wide. */
+function wrapsInto(first, entry, gap) {
+  return (
+    gap <= 1.5 * 1.2 * entry.size &&
+    entry.x >= first.x - 1 &&
+    Math.abs(first.size - entry.size) < 0.5 &&
+    first.right >= entry.right - 0.35 * (entry.right - first.x)
+  )
 }
 
 /** Levels 1–3 from the indent: the step is the smallest indent between entries on the page, else 1.5 × their size. */

@@ -135,7 +135,8 @@ describe('page content', () => {
     const doc = await source.open(await write('samples.pdf', buildPdf(TEXT)))
     const samples = await doc.samples(12)
     assert.equal(samples.length, 2)
-    assert.equal(samples[0][0].text, 'Chapter One')
+    assert.deepEqual(samples.map(s => s.page), [1, 2]) // with its page number, for the folio offset
+    assert.equal(samples[0].items[0].text, 'Chapter One')
   })
 })
 
@@ -243,6 +244,31 @@ describe('bounds', () => {
       assert.equal((await fs.stat(images[0].file)).size, 32 * 32 * 3)
       assert.ok(asked.length < ids.length, 'once the budget is spent, the remaining pictures are not asked for')
       assert.ok(PAGE_IMAGE_WAIT_MS <= 10_000)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('once the wait is spent, a picture pdf.js already holds is still taken', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'book-reader-ready-'))
+    try {
+      const OPS = { paintImageXObject: 6 }
+      const picture = { width: 32, height: 32, kind: 2, data: new Uint8Array(32 * 32 * 3).fill(9) }
+      // 40 pictures never come; the last one was decoded already (pdf.js `has` is true, `get` answers at once).
+      const objs = {
+        has: id => id === 'img_ready',
+        get: (id, callback) => {
+          if (callback) return
+          if (id !== 'img_ready') throw new Error(`${id} is not resolved`)
+          return picture
+        },
+      }
+      const page = { objs, commonObjs: objs }
+      const ids = [...Array.from({ length: 40 }, (_, i) => `img_${i}`), 'img_ready']
+      const ops = { fnArray: ids.map(() => OPS.paintImageXObject), argsArray: ids.map(id => [id, 32, 32]) }
+      const images = await imagesOf({ OPS }, page, ops, 'ready-1', dir, { waitMs: 100 })
+      assert.equal(images.length, 1)
+      assert.ok(images[0].file.endsWith('ready-1-40.rgb'))
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
