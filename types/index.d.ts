@@ -99,6 +99,8 @@ declare module 'claude-code' {
       readerNote: string | null
       /** The terminal draws pictures (kitty, Ghostty). */
       graphics: boolean
+      /** The reading mode the server last reported: the dashboard offers `r` read here in text mode. */
+      readerMode: ReaderMode
     }
   }
 }

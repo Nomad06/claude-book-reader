@@ -129,7 +129,12 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
     if (at >= 0) panes.splice(at, 1)
     return { value: undefined }
   })
-  on('ui.log', () => ({ value: undefined }))
+  // What the mod logs (debug lines included), e.g. a refused focus move.
+  const logs: string[] = []
+  on('ui.log', ($, e) => {
+    logs.push(e.text)
+    return { value: undefined }
+  })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.render', ($, e) => $.ui.resolve(e).Box({}))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -208,7 +213,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   })
   const posted = (path: string) => calls.filter(c => c.method === 'POST' && c.path === path)
   const daemon = () => runs.find(argv => argv.includes('--daemon'))
-  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses, scrolls, release, state }
+  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses, scrolls, release, state, logs }
 }
 
 export const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const

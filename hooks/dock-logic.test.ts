@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
-  SPINES, badge, bar, chapters, clock, dockModel, gradient, heatmap, initials, newTask, nextUp, percent, spaced,
-  spineColor, spoken, summary, taskName, tier, withBaseline,
+  SPINES, badge, bar, chapters, clock, dockModel, gradient, heatmap, initials, newTask, nextUp, noBookLine, percent,
+  phaseWord, spaced, spineColor, spoken, summary, taskName, tier, withBaseline,
 } from './dock-logic.ts'
 
 const BOOK = { id: 'abc123abc123', path: '/books/dune.pdf', title: 'Dune', page: 42, pages: 300, readCount: 37, openedAt: 1 }
@@ -72,6 +72,14 @@ describe('dock text', () => {
     expect(tier(63)).toBe('compact')
     expect(tier(40)).toBe('compact')
     expect(tier(39)).toBe('tiny')
+  })
+
+  test('the masthead names the phase; an empty dock says why', () => {
+    expect(phaseWord('working')).toBe('R E A D I N G')
+    expect(phaseWord('done')).toBe('C O M P L E T E')
+    expect(phaseWord('idle')).toBe('S T A N D I N G   B Y')
+    expect(noBookLine(true)).toBe('No book yet · run /book choose')
+    expect(noBookLine(false)).toBe('Reader server not running · starts with the next task')
   })
 })
 

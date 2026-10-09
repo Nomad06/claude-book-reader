@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { On } from 'claude-code'
 
-import type { BookDetail, BookSummary } from '../types'
+import type { BookDetail, BookSummary, DockView } from '../types'
 import {
   ACCENT_FROM,
   ACCENT_TO,
@@ -15,7 +15,9 @@ import {
   gradient,
   heatmap,
   initials,
+  noBookLine,
   percent,
+  phaseWord,
   spaced,
   spineColor,
   tier,
@@ -33,6 +35,7 @@ const dock = atom({ plugin: 'book-reader', key: 'dock' } as const, null)
 const dockTask = atom({ plugin: 'book-reader', key: 'dockTask' } as const, null)
 const dockView = atom({ plugin: 'book-reader', key: 'dockView' } as const, 'main')
 const blink = atom({ plugin: 'book-reader', key: 'blink' } as const, false)
+const readerMode = atom({ plugin: 'book-reader', key: 'readerMode' } as const, 'browser')
 
 /** Chapter rows shown at once; the list starts up to three rows before the current one. */
 const MAX_ROWS = 12
@@ -43,14 +46,17 @@ const BUCKET_COLOR: Record<Bucket, string | undefined> = { read: READ, unread: U
 const answeredByRegister = () => {}
 
 export function registerDock(on: On): void {
-  on('ui.render', { component: 'Pane', requestId: DOCK }, async ($, e) => {
-    const { Box, Button, Input, Text } = $.ui.resolve(e)
+  on('ui.render', { component: 'Pane', requestId: DOCK }, async ($, e, next) => {
+    // The reader view (text mode) is reader.tsx's.
+    if ((await read($, dockView)) === 'reader') return next(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const model = dockModel(await read($, dock), await read($, dockTask), await $.clock.now())
     const view = await read($, dockView)
     const isBlinkOn = await read($, blink)
+    const isTextMode = (await read($, readerMode)) === 'text'
     const columns = Math.max(20, e.props.bodyColumns)
     const size = tier(columns)
-    const showView = (to: 'main' | 'library') => update($, dockView, () => to)
+    const showView = (to: DockView) => update($, dockView, () => to)
 
     const gradientText = (text: string) => {
       const colors = gradient([...text].length)
@@ -81,12 +87,12 @@ export function registerDock(on: On): void {
       const state =
         model.phase === 'working' ? (
           <Text color={GREEN} dimColor={!isBlinkOn}>
-            ● {spaced('Reading')}
+            ● {phaseWord(model.phase)}
           </Text>
         ) : model.phase === 'done' ? (
-          <Text color={GREEN}>{spaced('Complete')}</Text>
+          <Text color={GREEN}>{phaseWord(model.phase)}</Text>
         ) : (
-          <Text dimColor>{spaced('Standing by')}</Text>
+          <Text dimColor>{phaseWord(model.phase)}</Text>
         )
       return (
         <Box key="masthead" flexDirection="row" justifyContent="space-between">
@@ -184,16 +190,12 @@ export function registerDock(on: On): void {
     )
 
     const footer = () => (
-      <Box key="keys" flexDirection="row" columnGap={2}>
+      <Box key="keys" flexDirection="row" flexWrap="wrap" columnGap={2}>
         <Button key="dock-open" label="Open reader" hotkey="o" onPress={answeredByRegister} />
+        {/* Shows the reader view and loads the page: register.tsx answers it. */}
+        {isTextMode && <Button key="reader-read" label="Read here" hotkey="r" onPress={answeredByRegister} />}
         <Button key="dock-library" label="Library" hotkey="l" onPress={() => showView('library')} />
         <Text dimColor>tab chapters · esc back</Text>
-        {/* Temporary reader keys until the reader view draws its own (Task 7). */}
-        <Button key="reader-next" plain label="n" onPress={answeredByRegister} />
-        <Button key="reader-prev" plain label="p" onPress={answeredByRegister} />
-        <Button key="reader-open" plain label="o2" onPress={answeredByRegister} />
-        <Button key="reader-mark" plain label="m" onPress={answeredByRegister} />
-        <Input key="reader-goto" label="go" onSubmit={() => {}} />
       </Box>
     )
 
@@ -222,7 +224,7 @@ export function registerDock(on: On): void {
         <Box flexDirection="column">
           {masthead()}
           {hairline}
-          <Text dimColor>{model.isServerUp ? 'No book yet · run /book choose' : 'Reader server not running · starts with the next task'}</Text>
+          <Text dimColor>{noBookLine(model.isServerUp)}</Text>
           {taskRow()}
           {model.phase === 'done' && doneBox()}
         </Box>

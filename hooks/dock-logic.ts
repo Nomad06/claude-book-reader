@@ -248,6 +248,16 @@ export type DockModel = {
   reason: DockTask['reason']
 }
 
+/** The masthead's word for the phase, shared by the dashboard and the reader view. */
+export function phaseWord(phase: DockPhase): string {
+  return spaced(phase === 'working' ? 'Reading' : phase === 'done' ? 'Complete' : 'Standing by')
+}
+
+/** What a dock without a book says, in every view. */
+export function noBookLine(isServerUp: boolean): string {
+  return isServerUp ? 'No book yet · run /book choose' : 'Reader server not running · starts with the next task'
+}
+
 /** Everything one drawing of the dock needs. */
 export function dockModel(snapshot: DockSnapshot | null, task: DockTask | null, now: number): DockModel {
   const isServerUp = snapshot?.isServerUp ?? false

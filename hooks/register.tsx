@@ -4,7 +4,8 @@ import type { EngineInterface, Register, Timer, TurnCompleteInput } from 'claude
 import type { BookDetail, BookSummary, DockSnapshot, DoneBand, OutlineEntry, ReaderMode, ReaderPage, ReaderState } from '../types'
 import { badge, newTask, withBaseline } from './dock-logic.ts'
 import { registerDock } from './dock.tsx'
-import { isGraphicsTerminal, parseGoto, readerMode } from './reader-logic.ts'
+import { isGraphicsTerminal, parseGoto, readerMode as modeFrom } from './reader-logic.ts'
+import { registerReader } from './reader.tsx'
 
 // The reader itself is a local web page (pdf.js) served by server/server.mjs on
 // 127.0.0.1. This module starts that server on demand, opens the book when a
@@ -23,6 +24,8 @@ const readerPage = atom({ plugin: 'book-reader', key: 'readerPage' } as const, n
 const readerShownAt = atom({ plugin: 'book-reader', key: 'readerShownAt' } as const, null)
 const readerNote = atom({ plugin: 'book-reader', key: 'readerNote' } as const, null)
 const graphics = atom({ plugin: 'book-reader', key: 'graphics' } as const, false)
+// The mode as last seen, for the dock's `r` read here (text mode only).
+const readerMode = atom({ plugin: 'book-reader', key: 'readerMode' } as const, 'browser')
 
 const HELP = [
   '/book                 open the current book now (or pick one)',
@@ -292,7 +295,7 @@ async function delaySeconds($: EngineInterface): Promise<number> {
 
 // The server's setting wins over the config; with the server down, the last one it reported.
 function modeOf(state: ReaderState | null): ReaderMode {
-  if (state) live.mode = readerMode(state.settings?.mode, cfg.mode)
+  if (state) live.mode = modeFrom(state.settings?.mode, cfg.mode)
   return live.mode ?? cfg.mode
 }
 
@@ -362,6 +365,8 @@ async function refreshDock($: EngineInterface): Promise<DockSnapshot> {
     : { isServerUp: false, current: null, books: [], viewers: 0 }
   await update($, dock, () => snapshot)
   await update($, dockTask, task => withBaseline(task, snapshot))
+  const mode = modeOf(state)
+  await update($, readerMode, () => mode)
   return snapshot
 }
 
@@ -504,7 +509,7 @@ async function openDockAsked($: EngineInterface): Promise<void> {
   if (live.turnId === null) await restStatus($)
 }
 
-// Presses on the dock that reach the reader server; dock.tsx draws the Buttons.
+// Presses on the dock that reach the reader server; dock.tsx and reader.tsx draw the Buttons.
 async function dockPress($: EngineInterface, element: string): Promise<void> {
   if (element === 'dock-close' || element === 'dock-keep') {
     if (element === 'dock-close') await closeBook($)
@@ -515,6 +520,13 @@ async function dockPress($: EngineInterface, element: string): Promise<void> {
   if (element === 'reader-next') return turnPage($, 1)
   if (element === 'reader-prev') return turnPage($, -1)
   if (element === 'reader-mark') return markRead($)
+  if (element === 'reader-read') {
+    // The dashboard's `r` read here: the reader view, at the saved page.
+    await update($, dockView, () => 'reader')
+    const book = await currentReaderBook($)
+    if (book) await loadPage($, book, book.page)
+    return
+  }
   if (element === 'reader-open') {
     // The escape hatch: the browser at the page shown, whatever the mode.
     const book = await currentReaderBook($)
@@ -683,6 +695,7 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
     await ensureServer($)
     await api($, 'POST', '/api/settings', { mode: value })
     live.mode = value
+    await update($, readerMode, () => value)
     if (value === 'browser') await update($, dockView, view => (view === 'reader' ? 'main' : view))
     return value === 'text'
       ? '📖 Reading mode text: the book opens in the Reading Dock as text; o opens the browser.'
@@ -855,6 +868,7 @@ export const register: Register = (on, options) => {
 
   // The dock's drawing lives in dock.tsx; its lifecycle stays here.
   registerDock(on)
+  registerReader(on)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
