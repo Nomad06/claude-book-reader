@@ -237,7 +237,7 @@ export const PANE_PROPS = {
 } as const
 
 /** Draws the Reading Dock through the mod, `columns` wide. */
-export function mountDock($: TestDollar, surface: 'terminal' | 'desktop', columns = 72) {
+export function mountDock($: TestDollar, surface: 'terminal' | 'desktop' | 'mobile', columns = 72) {
   return $.ui.mount({
     plugin: 'book-reader',
     surface,

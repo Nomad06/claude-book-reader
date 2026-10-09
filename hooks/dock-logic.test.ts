@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   SPINES, badge, bar, chapters, clock, dockModel, gradient, heatmap, initials, newTask, nextUp, noBookLine, percent,
-  phaseWord, spaced, spineColor, spoken, summary, taskName, tier, withBaseline,
+  phaseWord, readClock, spaced, spineColor, spoken, summary, taskName, tier, withBaseline,
 } from './dock-logic.ts'
 
 const BOOK = { id: 'abc123abc123', path: '/books/dune.pdf', title: 'Dune', page: 42, pages: 300, readCount: 37, openedAt: 1 }
@@ -252,5 +252,31 @@ describe('dock logic with absurd page counts', () => {
   test('two entries on one page both count it', () => {
     const rows = chapters([{ title: 'A', page: 1, level: 0 }, { title: 'B', page: 1, level: 0 }, { title: 'C', page: 3, level: 0 }], [1, 2], 3, 4)
     expect(rows.map(row => [row.title, row.readPages, row.status])).toEqual([['A', 1, 'done'], ['B', 2, 'done'], ['C', 0, 'current']])
+  })
+})
+
+describe('read clock', () => {
+  const page = { page: 43, fetchedAt: 10_000 }
+
+  test('no start time yet: the clock starts', () => {
+    expect(readClock(page, null, 10_000, 6, false)).toBe('start')
+  })
+
+  test('a start time older than the page belongs to an earlier page: the clock starts over', () => {
+    expect(readClock(page, 1_000, 30_000, 6, false)).toBe('start')
+  })
+
+  test('waits for readSeconds, then marks the page read', () => {
+    expect(readClock(page, 10_000, 15_999, 6, false)).toBe('wait')
+    expect(readClock(page, 10_000, 16_000, 6, false)).toBe('mark')
+  })
+
+  test('a page already read is left alone', () => {
+    expect(readClock(page, 10_000, 60_000, 6, true)).toBe('none')
+  })
+
+  test('a page that answered with an error is never marked read', () => {
+    expect(readClock({ ...page, error: 'boom' }, 10_000, 60_000, 6, false)).toBe('none')
+    expect(readClock({ ...page, error: 'boom' }, null, 60_000, 6, false)).toBe('none')
   })
 })

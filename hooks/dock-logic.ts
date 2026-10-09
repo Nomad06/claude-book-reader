@@ -258,6 +258,26 @@ export function noBookLine(isServerUp: boolean): string {
   return isServerUp ? 'No book yet · run /book choose' : 'Reader server not running · starts with the next task'
 }
 
+/**
+ * What one tick of the read clock does with the page on screen: start the
+ * clock, wait, mark the page read, or nothing. A start time older than the
+ * page belongs to an earlier page (a tick that ran while the page was being
+ * written): the clock starts over. A page that answered with an error was
+ * never read.
+ */
+export function readClock(
+  page: { fetchedAt: number; error?: string },
+  shownAt: number | null,
+  now: number,
+  readSeconds: number,
+  isRead: boolean,
+): 'start' | 'wait' | 'mark' | 'none' {
+  if (page.error) return 'none'
+  if (shownAt === null || shownAt < page.fetchedAt) return 'start'
+  if (isRead) return 'none'
+  return now - shownAt < readSeconds * 1000 ? 'wait' : 'mark'
+}
+
 /** Everything one drawing of the dock needs. */
 export function dockModel(snapshot: DockSnapshot | null, task: DockTask | null, now: number): DockModel {
   const isServerUp = snapshot?.isServerUp ?? false

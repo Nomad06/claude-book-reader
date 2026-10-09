@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, TurnCompleteInput } from 'claude-code'
 
 import type { BookDetail, BookSummary, DockSnapshot, DoneBand, OutlineEntry, ReaderMode, ReaderPage, ReaderState } from '../types'
-import { badge, newTask, withBaseline } from './dock-logic.ts'
+import { badge, newTask, readClock, withBaseline } from './dock-logic.ts'
 import { registerDock } from './dock.tsx'
 import { isGraphicsTerminal, parseGoto, readerMode as modeFrom } from './reader-logic.ts'
 import { registerReader } from './reader.tsx'
@@ -439,12 +439,12 @@ async function tickReadClock($: EngineInterface, snapshot: DockSnapshot): Promis
   if (!(await readerShown($))) return stopReadClock($)
   const now = await $.clock.now()
   const shownAt = await read($, readerShownAt)
-  if (shownAt === null) {
+  const verdict = readClock(page, shownAt, now, snapshot.readSeconds ?? 6, book.read.includes(page.page))
+  if (verdict === 'start') {
     await update($, readerShownAt, () => now)
     return
   }
-  if (book.read.includes(page.page)) return
-  if (now - shownAt < (snapshot.readSeconds ?? 6) * 1000) return
+  if (verdict !== 'mark') return
   await api($, 'POST', `/api/books/${book.id}/progress`, { read: [page.page] })
   await refreshDock($)
 }
@@ -454,18 +454,24 @@ async function tickReadClock($: EngineInterface, snapshot: DockSnapshot): Promis
 // Fetches one page into the reader view. A newer request wins over a late answer:
 // every write checks, at the moment it is made, that no newer request began (a
 // write the engine retries runs its check again), and an older request never
-// posts its page as the place.
-async function loadPage($: EngineInterface, book: BookSummary, page: number): Promise<void> {
+// posts its page as the place. The server may have gone since the last page
+// (n/p retry): it is started again first, and a failure to start is the note.
+async function loadPage($: EngineInterface, book: { id: string }, page: number): Promise<void> {
   const request = ++live.pageRequest
   const isLatest = () => request === live.pageRequest
   await update($, readerNote, note => (isLatest() ? `Loading page ${page}…` : note))
   try {
+    await ensureServer($)
+    if (!isLatest()) return
     const answer = await api<Omit<ReaderPage, 'bookId' | 'fetchedAt'>>($, 'GET', `/api/books/${book.id}/page/${page}`)
     if (!isLatest()) return
     const now = await $.clock.now()
+    // The start time goes in before the page: a read-clock tick between the two
+    // writes then sees the old page with a fresh clock, never the new page with
+    // the old page's start (which would mark it read at once).
+    await update($, readerShownAt, at => (isLatest() ? now : at))
     await update($, readerPage, held => (isLatest() ? { ...answer, bookId: book.id, fetchedAt: now } : held))
     await update($, readerNote, note => (isLatest() ? (answer.error ?? null) : note))
-    await update($, readerShownAt, at => (isLatest() ? now : at))
     if (!isLatest()) return
     await api($, 'POST', `/api/books/${book.id}/progress`, { page })
     if (!isLatest()) return
@@ -477,12 +483,20 @@ async function loadPage($: EngineInterface, book: BookSummary, page: number): Pr
   }
 }
 
-async function currentReaderBook($: EngineInterface): Promise<BookDetail | null> {
-  return (await read($, dock))?.current ?? null
+/** The book the reader view turns: its id, saved place and length. */
+type ReaderBook = Pick<BookDetail, 'id' | 'page' | 'pages'>
+
+// The dock's current book; with the server gone, the book of the page the
+// reader still shows (spec: the reader keeps the last page, n/p retry).
+async function currentReaderBook($: EngineInterface): Promise<ReaderBook | null> {
+  const snapshot = await read($, dock)
+  if (snapshot?.isServerUp) return snapshot.current
+  const held = await read($, readerPage)
+  return held && { id: held.bookId, page: held.page, pages: held.pages }
 }
 
 // The page the reader shows of `book`; a page left from another book is none.
-async function shownPageOf($: EngineInterface, book: BookSummary): Promise<ReaderPage | null> {
+async function shownPageOf($: EngineInterface, book: { id: string }): Promise<ReaderPage | null> {
   const shown = await read($, readerPage)
   return shown && shown.bookId === book.id ? shown : null
 }
@@ -512,8 +526,13 @@ async function gotoPage($: EngineInterface, input: string): Promise<void> {
 }
 
 // Marks the page shown read, or unread again; nothing when no page of this book is shown.
+// With the server gone, m starts it again first (as n/p do): which pages are read is its to say.
 async function markRead($: EngineInterface): Promise<void> {
-  const book = await currentReaderBook($)
+  if (!(await read($, dock))?.isServerUp) {
+    await ensureServer($)
+    await refreshDock($)
+  }
+  const book = (await read($, dock))?.current
   if (!book) return
   const shown = await shownPageOf($, book)
   if (!shown) return
@@ -626,9 +645,13 @@ async function openForTurn($: EngineInterface, id: string): Promise<void> {
 
 async function finishTurn($: EngineInterface, e: TurnCompleteInput): Promise<void> {
   const state = await readerState($)
-  // Text mode reads in the dock: reading means the reader view is on screen.
+  // Text mode reads in the dock: reading means the reader view is on screen,
+  // even with the server gone (the reader keeps its last page; the done box
+  // still answers the task).
   const isText = modeOf(state) === 'text'
-  const isReading = state !== null && state.current !== null && (isText ? await readerShown($) : state.viewers > 0)
+  const isReading = isText
+    ? (state === null || state.current !== null) && (await readerShown($))
+    : state !== null && state.current !== null && state.viewers > 0
   // The dock shows the done view only to someone reading through the task.
   const endedAt = await $.clock.now()
   await update($, dockTask, task =>
@@ -1017,13 +1040,20 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     await dockPress($, e.element).catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
     // A press that left the reader view (d, l, c, a library row) leaves no page on screen.
+    // On it, the read clock needs the poll, which stops while the pane waits undrawn
+    // with no task: a press on a pane drawn again starts it (no-op when running).
     if ((await read($, dockView)) !== 'reader') await stopReadClock($)
+    else startDockPoll($)
     return result
   })
 
   on('ui.input', { requestId: DOCK, element: 'reader-goto' }, async ($, e, next) => {
     const result = await next(e)
-    if (e.kind === 'submit') await gotoPage($, e.value).catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
+    if (e.kind === 'submit') {
+      await gotoPage($, e.value).catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
+      // As for a press on the reader view: the read clock needs the poll.
+      startDockPoll($)
+    }
     return result
   })
 

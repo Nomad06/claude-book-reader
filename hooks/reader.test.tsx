@@ -325,3 +325,133 @@ describe('reading through a task', () => {
     await ui.unmount()
   })
 })
+
+describe('final review fixes', () => {
+  // Spec, error handling: server not running → the reader keeps the last page; n/p retry.
+  test('with the server gone the page stays; n starts it again and turns', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, daemon } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /^Page 42 text\.$/ })).toBeDefined()
+    reader.isUp = false
+    await clock.advance(2_000) // the dock's poll finds the server gone
+    expect(await ui.find({ type: 'Text', text: /^Page 42 text\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Reader server not running · n\/p retry$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /p\. 42 \/ 300/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /● working/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'reader-next' })).toBeDefined()
+    expect(daemon()).toBeUndefined()
+    await ui.press({ key: 'reader-next' })
+    expect(daemon()).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Page 43 text\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /not running/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Dune/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a retry that cannot start the server keeps the page and says why', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    // The server is up at first: the refusal only shows when the retry starts it.
+    const { clock } = world(on, reader, { placesPanes: true, daemonFails: 'Node 22.13 or newer is needed' })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    reader.isUp = false
+    await clock.advance(2_000)
+    await ui.press({ key: 'reader-prev' })
+    expect(await ui.find({ type: 'Text', text: /^Could not load page 41: .*Node 22\.13 or newer is needed/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Page 42 text\.$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the server gone mid-task: the done box still comes, and c answers it', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    reader.isUp = false
+    await clock.advance(2_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 9_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect(await ui.find({ type: 'Text', text: /Task finished in 9s/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Page 42 text\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'dock-keep' })).toBeDefined()
+    await ui.press({ key: 'dock-close' })
+    expect(state('dockTask')).toBeNull()
+    expect(state('dockView')).toBe('main')
+    await ui.unmount()
+  })
+
+  test('a page that answered with an error is never marked read', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', pages: { 42: { blocks: [], error: 'boom' } } }
+    const { clock, posted } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await clock.advance(20_000)
+    expect(posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)).not.toContainEqual({ read: [42] })
+  })
+
+  // A poll tick that lands while a turned page is being written must not pair
+  // the new page with the old page's start time.
+  test('a tick between the page and its start time does not mark the new page read', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    let tickOnPage = false
+    on('state.set', { key: 'readerPage' }, async ($, e, next) => {
+      const result = await next(e)
+      if (tickOnPage && (e.value as { page?: number } | null)?.page === 43) {
+        tickOnPage = false
+        await clock.advance(2_000)
+      }
+      return result
+    })
+    const { clock, posted } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await clock.advance(20_000) // page 42 read; its start time is long past readSeconds
+    const progress = () => posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)
+    expect(progress()).toContainEqual({ read: [42] })
+    const ui = await mountDock($, 'terminal')
+    tickOnPage = true
+    await ui.press({ key: 'reader-next' })
+    expect(tickOnPage).toBe(false)
+    expect(progress()).not.toContainEqual({ read: [43] })
+    await clock.advance(2_000)
+    expect(progress()).not.toContainEqual({ read: [43] })
+    await clock.advance(4_000)
+    expect(progress()).toContainEqual({ read: [43] })
+    await ui.unmount()
+  })
+
+  test('a page turn on a pane placed again restarts the poll: the read clock runs', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, panes, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 9_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'dock-keep' })
+    expect(state('dockView')).toBe('reader')
+    // The terminal narrows: the pane waits undrawn, and with no task the poll stops.
+    panes[0]!.isPlaced = false
+    await clock.advance(2_000)
+    panes[0]!.isPlaced = true
+    await ui.press({ key: 'reader-next' })
+    await clock.advance(8_000)
+    expect(posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)).toContainEqual({ read: [43] })
+    await ui.unmount()
+  })
+
+  test('on mobile, where there is no go-to field, there is no g', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'mobile')
+    expect(await ui.find({ type: 'Button', key: 'reader-next' })).toBeDefined()
+    expect(await ui.find({ type: 'Input' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'reader-go' })).toBeUndefined()
+    await ui.unmount()
+  })
+})

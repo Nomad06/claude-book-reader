@@ -37,12 +37,17 @@ export function registerReader(on: On): void {
     const book = model.book
     const held = await read($, readerPage)
     // A page left from another book (its own fetch failed) is not this book's.
-    const page = held && book && held.bookId === book.id ? held : null
+    // With the server gone there is no book to ask: the last page stays (n/p retry).
+    const isServerDown = !model.isServerUp
+    const page = held && (book ? held.bookId === book.id : isServerDown) ? held : null
     const note = await read($, readerNote)
     const canDrawImages = e.surface === 'terminal' && (await read($, graphics))
     const isBlinkOn = await read($, blink)
     const columns = Math.max(20, e.props.bodyColumns)
     const isNarrow = columns < MIN_COLUMNS
+    // The engine's mobile table has no Input; the test kit's resolve still hands
+    // one over there (and draws nothing), so the surface is checked as well.
+    const hasGotoField = e.surface !== 'mobile' && 'Input' in els
     const showView = (to: 'main' | 'library') => update($, dockView, () => to)
     const focusGoto = () =>
       $.ui
@@ -145,7 +150,19 @@ export function registerReader(on: On): void {
     }
 
     const header = () => {
-      if (!book) return null
+      if (!book) {
+        // The server gone: the page held, its title and read pages unknown until it is back.
+        return (
+          page && (
+            <Box key="header" flexDirection="row" justifyContent="space-between">
+              <Text dimColor wrap="truncate-end">
+                Reader server not running · n/p retry
+              </Text>
+              <Text>{pageLabel(page.page, page.pages, false)}</Text>
+            </Box>
+          )
+        )
+      }
       // A book whose page count is still unknown has no bar (as dock.tsx's bookHeader).
       const progress = book.pages ? bar(book.readCount / book.pages, 10) : null
       return (
@@ -206,9 +223,9 @@ export function registerReader(on: On): void {
       <Box key="keys" flexDirection="row" flexWrap="wrap" columnGap={2}>
         <Button key="reader-prev" plain label="← prev" hotkey="p" onPress={answeredByRegister} />
         <Button key="reader-next" plain label="next →" hotkey="n" onPress={answeredByRegister} />
-        <Button key="reader-go" plain label="go to" hotkey="g" onPress={focusGoto} />
-        {/* The mobile table has no Input (no field drawn there yet). */}
-        {'Input' in els && <els.Input key="reader-goto" placeholder="page" onSubmit={answeredByRegister} />}
+        {/* No field, no g: the mobile app draws no Input yet (its table has none). */}
+        {hasGotoField && <Button key="reader-go" plain label="go to" hotkey="g" onPress={focusGoto} />}
+        {hasGotoField && 'Input' in els && <els.Input key="reader-goto" placeholder="page" onSubmit={answeredByRegister} />}
         <Button key="reader-mark" plain label="mark read" hotkey="m" onPress={answeredByRegister} />
         <Button key="reader-open" plain label="browser" hotkey="o" onPress={answeredByRegister} />
         <Button key="reader-dash" plain label="dashboard" hotkey="d" onPress={() => showView('main')} />
@@ -216,12 +233,15 @@ export function registerReader(on: On): void {
       </Box>
     )
 
-    if (!book) {
+    if (!book && !page) {
+      // A task still runs or ends here (the server gone mid-task): its row and done box stay.
       return (
         <Box flexDirection="column">
           {masthead}
           {hairline}
           <Text dimColor>{noBookLine(model.isServerUp)}</Text>
+          {taskRow()}
+          {model.phase === 'done' && doneBox()}
           <Button key="reader-dash" plain label="dashboard" hotkey="d" onPress={() => showView('main')} />
         </Box>
       )
