@@ -361,7 +361,7 @@ async function refreshDock($: EngineInterface): Promise<DockSnapshot> {
     current = { ...state.current, read: detail.read ?? [], outline: detail.outline ?? null }
   }
   const snapshot: DockSnapshot = state
-    ? { isServerUp: true, current, books: state.books, viewers: state.viewers }
+    ? { isServerUp: true, current, books: state.books, viewers: state.viewers, readSeconds: state.settings?.readSeconds }
     : { isServerUp: false, current: null, books: [], viewers: 0 }
   await update($, dock, () => snapshot)
   await update($, dockTask, task => withBaseline(task, snapshot))
@@ -378,15 +378,28 @@ async function isDockPlaced($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(pane => pane.id === DOCK && pane.isPlaced)
 }
 
+/** The person can see page text right now: the dock is drawn, in front, and on the reader view. */
+async function readerShown($: EngineInterface): Promise<boolean> {
+  const pane = (await $.ui.panes()).find(p => p.id === DOCK)
+  return !!pane && pane.isPlaced && pane.isShown && (await read($, dockView)) === 'reader'
+}
+
+/** No page is on screen: the read clock waits until one is again. */
+async function stopReadClock($: EngineInterface): Promise<void> {
+  if ((await read($, readerShownAt)) !== null) await update($, readerShownAt, () => null)
+}
+
 async function openDock($: EngineInterface): Promise<void> {
   await $.ui.open({ id: DOCK, title: 'Book Reader', columns: 72 })
   await refreshDock($)
   startDockPoll($)
 }
 
-// While the dock is open: every 2 s, fetch what it shows (when it is drawn) and
-// blink its ● READING. Stops after three ticks with no task and no reader window
-// (a reader just launched takes a moment to connect).
+// While the dock is open: every 2 s, fetch what it shows (when it is drawn),
+// blink its ● READING and run the read clock. Stops after three ticks with no
+// task, no reader window (a reader just launched takes a moment to connect) and
+// the dock not on the reader view (a page there, even behind another pane, starts
+// its clock again when it comes to the front).
 function startDockPoll($: EngineInterface): void {
   if (live.dockPoll) return
   let idleTicks = 0
@@ -394,14 +407,17 @@ function startDockPoll($: EngineInterface): void {
     const task = await read($, dockTask)
     const isWorking = task !== null && task.endedAt === null
     if (!(await isDockPlaced($))) {
+      await stopReadClock($)
       if (!isWorking || !(await hasDock($))) stopDockPoll()
       return
     }
     try {
       const snapshot = await refreshDock($)
-      idleTicks = !isWorking && snapshot.viewers === 0 ? idleTicks + 1 : 0
+      const isReaderView = (await read($, dockView)) === 'reader'
+      idleTicks = !isWorking && snapshot.viewers === 0 && !isReaderView ? idleTicks + 1 : 0
       if (idleTicks >= 3) return stopDockPoll()
       await update($, blink, on => !on)
+      await tickReadClock($, snapshot)
     } catch (error) {
       $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' })
     }
@@ -411,6 +427,26 @@ function startDockPoll($: EngineInterface): void {
 function stopDockPoll(): void {
   live.dockPoll?.cancel()
   live.dockPoll = null
+}
+
+// Marks the page read once it has been on screen for readSeconds. The clock
+// starts over whenever the page is not on screen (another pane or the dock's
+// library in front, the pane folded or waiting undrawn).
+async function tickReadClock($: EngineInterface, snapshot: DockSnapshot): Promise<void> {
+  const book = snapshot.current
+  const page = book ? await shownPageOf($, book) : null
+  if (!book || !page) return
+  if (!(await readerShown($))) return stopReadClock($)
+  const now = await $.clock.now()
+  const shownAt = await read($, readerShownAt)
+  if (shownAt === null) {
+    await update($, readerShownAt, () => now)
+    return
+  }
+  if (book.read.includes(page.page)) return
+  if (now - shownAt < (snapshot.readSeconds ?? 6) * 1000) return
+  await api($, 'POST', `/api/books/${book.id}/progress`, { read: [page.page] })
+  await refreshDock($)
 }
 
 // ------------------------------------------------------------ the reader view
@@ -512,6 +548,13 @@ async function openDockAsked($: EngineInterface): Promise<void> {
 // Presses on the dock that reach the reader server; dock.tsx and reader.tsx draw the Buttons.
 async function dockPress($: EngineInterface, element: string): Promise<void> {
   if (element === 'dock-close' || element === 'dock-keep') {
+    if ((await read($, readerMode)) === 'text') {
+      // No window to close: c goes back to the dashboard, k stays on the page.
+      // Both answer the task, so a browser opened later does not ask again.
+      await keepReading($)
+      if (element === 'dock-close') await update($, dockView, () => 'main')
+      return
+    }
     if (element === 'dock-close') await closeBook($)
     else await keepReading($)
     await update($, dockTask, () => null)
@@ -525,6 +568,8 @@ async function dockPress($: EngineInterface, element: string): Promise<void> {
     await update($, dockView, () => 'reader')
     const book = await currentReaderBook($)
     if (book) await loadPage($, book, book.page)
+    // The poll may have gone idle on the dashboard: the read clock needs it.
+    startDockPoll($)
     return
   }
   if (element === 'reader-open') {
@@ -581,7 +626,9 @@ async function openForTurn($: EngineInterface, id: string): Promise<void> {
 
 async function finishTurn($: EngineInterface, e: TurnCompleteInput): Promise<void> {
   const state = await readerState($)
-  const isReading = state !== null && state.viewers > 0 && state.current !== null
+  // Text mode reads in the dock: reading means the reader view is on screen.
+  const isText = modeOf(state) === 'text'
+  const isReading = state !== null && state.current !== null && (isText ? await readerShown($) : state.viewers > 0)
   // The dock shows the done view only to someone reading through the task.
   const endedAt = await $.clock.now()
   await update($, dockTask, task =>
@@ -594,9 +641,11 @@ async function finishTurn($: EngineInterface, e: TurnCompleteInput): Promise<voi
     returnTo: await returnTarget($),
     durationMs: e.durationMs,
     summary: e.answer.slice(0, 600),
-    notify: isReading && cfg.notify && e.reason !== 'aborted',
+    notify: isReading && !isText && cfg.notify && e.reason !== 'aborted',
   })
   if (!isReading || !state.current) return
+  // The reader view's done box is the whole answer: no band (the dock is drawn), no window to follow.
+  if (isText) return
   const book = state.current
   const done: DoneBand = {
     title: book.title,
@@ -696,7 +745,10 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
     await api($, 'POST', '/api/settings', { mode: value })
     live.mode = value
     await update($, readerMode, () => value)
-    if (value === 'browser') await update($, dockView, view => (view === 'reader' ? 'main' : view))
+    if (value === 'browser') {
+      await update($, dockView, view => (view === 'reader' ? 'main' : view))
+      await stopReadClock($)
+    }
     return value === 'text'
       ? '📖 Reading mode text: the book opens in the Reading Dock as text; o opens the browser.'
       : '📖 Reading mode browser: the book opens in its own window.'
@@ -964,6 +1016,8 @@ export const register: Register = (on, options) => {
   on('ui.press', { requestId: DOCK }, async ($, e, next) => {
     const result = await next(e)
     await dockPress($, e.element).catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
+    // A press that left the reader view (d, l, c, a library row) leaves no page on screen.
+    if ((await read($, dockView)) !== 'reader') await stopReadClock($)
     return result
   })
 
@@ -977,6 +1031,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.origin.kind === 'person') live.dockDismissed = true
     stopDockPoll()
+    await stopReadClock($)
     // The band waits while the dock is drawn: draw it again now that the dock is gone.
     await update($, band, held => held && { ...held })
     return result

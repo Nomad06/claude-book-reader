@@ -40,6 +40,8 @@ export type DockSnapshot = {
   current: BookDetail | null
   books: BookSummary[]
   viewers: number
+  /** The server's `settings.readSeconds`: how long a page stays on screen before it counts as read. */
+  readSeconds?: number
 }
 
 /** The task the dock follows, from its start until the person closes the book or reads on. */

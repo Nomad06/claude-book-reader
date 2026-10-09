@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Block, ReaderPage } from '../types'
-import { BOOK, mountDock, world } from './test-world.ts'
+import { BAND_PROPS, BOOK, mountDock, RUN, world } from './test-world.ts'
 import type { Reader } from './test-world.ts'
 
 const OTHER = 'b0b0b0b0b0b0'
@@ -170,6 +170,155 @@ describe('reader view', () => {
     const ui = await mountDock($, 'terminal', 36)
     expect(await ui.find({ type: 'Text', text: /Widen the terminal to read here · o opens in browser/ })).toBeDefined()
     expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    await ui.unmount()
+  })
+})
+
+describe('reading through a task', () => {
+  test('a page on screen for readSeconds is marked read; a turned page restarts the clock', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const progress = () => posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)
+    await clock.advance(4_000)
+    expect(progress()).not.toContainEqual({ read: [42] })
+    await clock.advance(2_000)
+    expect(progress()).toContainEqual({ read: [42] })
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'reader-next' })
+    await clock.advance(4_000)
+    expect(progress()).not.toContainEqual({ read: [43] })
+    await clock.advance(2_000)
+    expect(progress()).toContainEqual({ read: [43] })
+    expect(progress().filter(b => JSON.stringify(b) === '{"read":[43]}')).toHaveLength(1)
+    await ui.unmount()
+  })
+
+  // Review Focus: the dock is placed, but another pane is the one in front.
+  test('nothing is marked read while the pane is not shown', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true, shownPane: false })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await clock.advance(20_000)
+    expect(posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)).not.toContainEqual({ read: [42] })
+    expect(state('readerShownAt')).toBeNull()
+  })
+
+  // Review Focus: the pane is in front, but on the library tab.
+  test('nothing is marked read while the library is in front', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'reader-library' })
+    expect(state('readerShownAt')).toBeNull()
+    await clock.advance(20_000)
+    expect(posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)).not.toContainEqual({ read: [42] })
+    expect(state('readerShownAt')).toBeNull()
+    await ui.unmount()
+  })
+
+  test('the task ends inside the reader: done box, no notification, c returns to the dashboard', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 9_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect(posted('/api/task').at(-1)?.body).toMatchObject({ state: 'done', notify: false })
+    expect(posted('/api/close')).toHaveLength(0)
+    const ui = await mountDock($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /Task finished in 9s/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Page 42 text\./ })).toBeDefined()
+    await ui.press({ key: 'dock-close' })
+    expect(posted('/api/close')).toHaveLength(0)
+    // A browser opened later must not ask again.
+    expect(posted('/api/task').at(-1)?.body).toEqual({ state: 'ack' })
+    expect(state('dockView')).toBe('main')
+    expect(state('readerShownAt')).toBeNull()
+    expect(await ui.find({ type: 'Text', text: /Task finished/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'reader-read' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('k keeps reading on the same page', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 9_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'dock-keep' })
+    expect(posted('/api/task').at(-1)?.body).toEqual({ state: 'ack' })
+    expect(posted('/api/close')).toHaveLength(0)
+    expect(state('dockView')).toBe('reader')
+    expect(await ui.find({ type: 'Text', text: /Task finished/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Page 42 text\./ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('with the reader not shown when the task ends, there is no done box and no band', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: false })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 9_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect(posted('/api/task').at(-1)?.body).toMatchObject({ state: 'done', notify: false })
+    expect(state('dockTask')).toBeNull()
+    const band = await $.ui.mount({ plugin: 'book-reader', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await band.find({ type: 'Text', text: /Task finished/ })).toBeUndefined()
+    await band.unmount()
+  })
+
+  // Text mode keys on the reader being shown, not on browser windows (spec, turn complete).
+  test('in text mode an open browser window alone is not reading: no done box, band or notification', async ($, on) => {
+    const reader: Reader = { viewers: 1, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: false })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 9_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect(posted('/api/task').at(-1)?.body).toMatchObject({ state: 'done', notify: false })
+    expect(state('dockTask')).toBeNull()
+    const band = await $.ui.mount({ plugin: 'book-reader', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await band.find({ type: 'Text', text: /Task finished/ })).toBeUndefined()
+    await band.unmount()
+  })
+
+  // The test's `$.ui` has no `close` (render, scroll, focus, press, input, select,
+  // mount), so the person's close mark cannot be raised here. `/book dock` folds
+  // the pane through the mod's `$.ui.close`, which raises the same `ui.close`
+  // hook (origin plugin); the hook stops the clock whatever the origin.
+  test('closing the pane stops the read clock', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state, panes } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    expect(state('readerShownAt')).toBe(6_000)
+    await $.command.run({ ...RUN, command: 'book', args: 'dock' })
+    // `$.command.run` answers before the command's unawaited fold settles.
+    for (let i = 0; i < 2; i++) await new Promise(resolve => setTimeout(resolve, 50))
+    expect(panes).toHaveLength(0)
+    expect(state('readerShownAt')).toBeNull()
+    await clock.advance(20_000)
+    expect(posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)).not.toContainEqual({ read: [42] })
+  })
+
+  test('/book mode browser while reading goes back to the dashboard', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    await $.command.run({ ...RUN, command: 'book', args: 'mode browser' })
+    expect(state('dockView')).toBe('main')
+    expect(state('readerShownAt')).toBeNull()
+    const ui = await mountDock($, 'terminal')
+    // Browser mode now: the dashboard offers the window, not r read here.
+    expect(await ui.find({ type: 'Button', key: 'dock-open' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'reader-next' })).toBeUndefined()
+    await clock.advance(20_000)
+    expect(posted(`/api/books/${BOOK.id}/progress`).map(c => c.body)).not.toContainEqual({ read: [42] })
     await ui.unmount()
   })
 })
