@@ -1,6 +1,6 @@
 import { mock } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
-import type { On, UiScrollArgs } from 'claude-code'
+import type { On, PluginState, UiScrollArgs } from 'claude-code'
 
 import type { BookSummary, OutlineEntry, ReaderPage } from '../types'
 
@@ -53,6 +53,8 @@ export type Host = {
   placesPanes?: boolean
   /** Whether the dock pane is the one in front (default true). */
   shownPane?: boolean
+  /** What the server prints when it refuses to start (exit 1), e.g. node too old. */
+  daemonFails?: string
 }
 
 const ok = (stdout: string, exitCode = 0) => ({
@@ -85,6 +87,16 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   on('fs.exists', ($, e) => ({ value: host.files.some(file => e.path === file || e.path.endsWith(`/${file}`)) }))
   on('session.cwd', () => ({ value: host.cwd }))
   mock.store(on)
+  // The test's `$` has no `state` noun: keep the mod's last write of each value.
+  const stateValues = new Map<string, unknown>()
+  on('state.set', async ($, e, next) => {
+    const result = await next(e)
+    // Beneath the mod, `next` resolves the bottom's answer, `{ value: { isSet, version } }`.
+    const isSet = (result as unknown as { value?: { isSet?: boolean } }).value?.isSet === true
+    if (e.plugin === 'book-reader' && isSet) stateValues.set(e.key, e.value)
+    return result
+  })
+  const state = <K extends keyof PluginState['book-reader']>(key: K) => stateValues.get(key) as PluginState['book-reader'][K] | undefined
   const clock = mock.clock(on, { now: 1_000 })
   on('ui.toast', () => ({ value: undefined }))
   const statuses: (string | undefined)[] = []
@@ -104,8 +116,9 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
     value: panes.map(pane => ({ ...pane, title: 'Book Reader', isShown: host.shownPane !== false, isFocused: false })),
   }))
   on('ui.scroll', ($, e) => {
-    // The test engine raises the event with the arguments of `$.ui.scroll` as given
-    // (`to`, `in`, `block`); it resolves no window, so `requestId` and `offset` are absent.
+    // Only the test's own `$.ui.scroll` reaches here, with its arguments as given
+    // (`to`, `in`, `block`). The kit resolves no window for the mod's `$.ui.scroll`,
+    // which rejects ("no implementation for ui.scroll") before any hook runs.
     scrolls.push({ ...(e as unknown as UiScrollArgs) })
     return {}
   })
@@ -126,6 +139,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
     if (e.argv[0] === 'where.exe') return host.whereNode ? ok(host.whereNode) : ok('', 1)
     if (e.argv[0] === 'powershell.exe') return host.windowPid ? ok(host.windowPid) : ok('', 1)
     if (e.argv.includes('--daemon')) {
+      if (host.daemonFails) return { value: { exitCode: 1, stdout: '', stderr: `${host.daemonFails}\n`, isStdoutTruncated: false, isStderrTruncated: false } }
       const launchedFrom = e.argv[e.argv.indexOf('--launched-from') + 1]
       Object.assign(reader, { isUp: true, version: '1.2.3', launchedFrom })
     }
@@ -190,7 +204,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   })
   const posted = (path: string) => calls.filter(c => c.method === 'POST' && c.path === path)
   const daemon = () => runs.find(argv => argv.includes('--daemon'))
-  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses, scrolls, release }
+  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses, scrolls, release, state }
 }
 
 export const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const

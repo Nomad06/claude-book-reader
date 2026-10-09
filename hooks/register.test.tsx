@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BAND_PROPS, RUN, world } from './test-world.ts'
+import { BAND_PROPS, BOOK, RUN, mountDock, world } from './test-world.ts'
+import type { Reader } from './test-world.ts'
 
 describe('book-reader', () => {
   test('a long task opens the book after the delay and the end of the task offers to close it', async ($, on) => {
@@ -228,5 +229,125 @@ describe('book-reader', () => {
     await $.turn.start({ text: 'long one', turnId: 't5' })
     await clock.advance(5_000)
     expect(posted('/api/show')).toHaveLength(0)
+  })
+
+  test('/book mode reports and sets the mode', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true }
+    const { posted } = world(on, reader)
+    const shown = await $.command.run({ ...RUN, command: 'book', args: 'mode' })
+    expect(shown.text).toContain('Reading mode: browser')
+    const set = await $.command.run({ ...RUN, command: 'book', args: 'mode text' })
+    expect(set.text).toContain('text')
+    expect(posted('/api/settings').at(-1)?.body).toEqual({ mode: 'text' })
+    expect(reader.mode).toBe('text')
+    const bad = await $.command.run({ ...RUN, command: 'book', args: 'mode pigeon' })
+    expect(bad.text).toContain('Use /book mode text|browser')
+    const status = await $.command.run({ ...RUN, command: 'book', args: 'status' })
+    expect(status.text).toContain('Reading mode: text')
+  })
+
+  test('in text mode a long task opens the dock on the saved page, not the browser', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, opens, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'refactor auth', turnId: 't1' })
+    await clock.advance(5_000)
+    expect(posted('/api/show')).toHaveLength(0)
+    expect(opens).toEqual([{ id: 'book-dock', columns: 72 }])
+    expect(posted(`/api/books/${BOOK.id}/progress`).at(-1)?.body).toEqual({ page: 42 })
+    // The kit cannot resolve a mod's `$.ui.scroll` to a window: when the page landed stands in for it.
+    expect(state('readerShownAt')).toBe(6_000)
+    expect(state('readerPage')).toMatchObject({ bookId: BOOK.id, page: 42, pages: 300 })
+  })
+
+  test('/book mode text with no book, and with the server down', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: false, mode: 'text' }
+    const { opens } = world(on, reader)
+    const answer = await $.command.run({ ...RUN, command: 'book', args: 'mode text' })
+    expect(answer.text).toContain('text')
+    const open = await $.command.run({ ...RUN, command: 'book', args: 'open' })
+    expect(open.text).toContain('No book chosen')
+    expect(opens).toHaveLength(0)
+    reader.isUp = false
+    const down = await $.command.run({ ...RUN, command: 'book', args: 'mode' })
+    expect(down.text).toContain('Reading mode: text')
+  })
+
+  test('/book open in text mode answers at once, then opens the dock on the saved page', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { posted, opens, state } = world(on, reader)
+    const open = await $.command.run({ ...RUN, command: 'book', args: 'open' })
+    expect(open.text).toContain('Dune · p. 42/300')
+    // The pane's work starts once the answer is out; wait (real time) for its page.
+    for (let i = 0; i < 40 && state('readerPage') === undefined; i++) await new Promise(resolve => setTimeout(resolve, 25))
+    expect(posted('/api/show')).toHaveLength(0)
+    expect(opens).toEqual([{ id: 'book-dock', columns: 72 }])
+    expect(state('dockView')).toBe('reader')
+    expect(state('readerPage')).toMatchObject({ bookId: BOOK.id, page: 42 })
+  })
+
+  test('next, previous, go to and mark read reach the server, in text mode', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    await clock.advance(1_000)
+    await ui.press({ key: 'reader-next' })
+    expect(state('readerPage')?.page).toBe(43)
+    expect(state('readerShownAt')).toBe(7_000)
+    expect(posted(`/api/books/${BOOK.id}/progress`).at(-1)?.body).toEqual({ page: 43 })
+    await ui.press({ key: 'reader-prev' })
+    expect(state('readerPage')?.page).toBe(42)
+    await $.ui.input({ plugin: 'book-reader', key: 'reader-goto', text: '7' })
+    expect(state('readerPage')?.page).toBe(7)
+    await $.ui.input({ plugin: 'book-reader', key: 'reader-goto', text: '999' })
+    expect(state('readerPage')?.page).toBe(7)
+    expect(state('readerNote')).toContain('No page 999')
+    await ui.press({ key: 'reader-mark' })
+    expect(posted(`/api/books/${BOOK.id}/progress`).at(-1)?.body).toEqual({ read: [7] })
+    await ui.press({ key: 'reader-mark' })
+    expect(posted(`/api/books/${BOOK.id}/progress`).at(-1)?.body).toEqual({ unread: [7] })
+    await ui.unmount()
+  })
+
+  test('a late answer for an earlier page is dropped', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', holdPages: [43] }
+    const { clock, release, state } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    const slow = ui.press({ key: 'reader-next' }) // page 43: the world holds its answer
+    await $.ui.input({ plugin: 'book-reader', key: 'reader-goto', text: '10' }) // page 10 answers at once
+    expect(state('readerPage')?.page).toBe(10)
+    release(43)
+    await slow
+    expect(state('readerPage')?.page).toBe(10)
+    await ui.unmount()
+  })
+
+  test('o in the reader opens the browser at the current page even in text mode', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text' }
+    const { clock, posted } = world(on, reader, { placesPanes: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    const ui = await mountDock($, 'terminal')
+    await ui.press({ key: 'reader-open' })
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', page: 42 })
+    await ui.unmount()
+  })
+
+  test('graphics is detected from the environment once per session', async ($, on) => {
+    const { state } = world(on, { viewers: 0, hasBook: true }, { env: { TERM_PROGRAM: 'ghostty' } })
+    await $.session.start({ cwd: '/home/me/project' })
+    expect(state('graphics')).toBe(true)
+  })
+
+  test('a node too old to start the server: /book says so and /book status repeats it', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, isUp: false }
+    world(on, reader, { daemonFails: 'book-reader needs Node 22.13 or newer; found v20.11.1' })
+    const listed = await $.command.run({ ...RUN, command: 'book', args: 'list' })
+    expect(listed.text).toContain('book-reader needs Node 22.13 or newer; found v20.11.1')
+    const status = await $.command.run({ ...RUN, command: 'book', args: 'status' })
+    expect(status.text).toContain('book-reader needs Node 22.13 or newer; found v20.11.1')
   })
 })

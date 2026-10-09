@@ -41,6 +41,16 @@
       ],
       "default": "app"
     },
+    "mode": {
+      "type": "string",
+      "title": "Reading mode",
+      "description": "browser: the book opens in its own window; text: it is read inside the Reading Dock as text (pictures on kitty and Ghostty). /book mode changes it any time.",
+      "options": [
+        "browser",
+        "text"
+      ],
+      "default": "browser"
+    },
     "notify": {
       "type": "boolean",
       "title": "Desktop notification when a task finishes",

@@ -44,7 +44,7 @@ const answeredByRegister = () => {}
 
 export function registerDock(on: On): void {
   on('ui.render', { component: 'Pane', requestId: DOCK }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Input, Text } = $.ui.resolve(e)
     const model = dockModel(await read($, dock), await read($, dockTask), await $.clock.now())
     const view = await read($, dockView)
     const isBlinkOn = await read($, blink)
@@ -188,6 +188,12 @@ export function registerDock(on: On): void {
         <Button key="dock-open" label="Open reader" hotkey="o" onPress={answeredByRegister} />
         <Button key="dock-library" label="Library" hotkey="l" onPress={() => showView('library')} />
         <Text dimColor>tab chapters · esc back</Text>
+        {/* Temporary reader keys until the reader view draws its own (Task 7). */}
+        <Button key="reader-next" plain label="n" onPress={answeredByRegister} />
+        <Button key="reader-prev" plain label="p" onPress={answeredByRegister} />
+        <Button key="reader-open" plain label="o2" onPress={answeredByRegister} />
+        <Button key="reader-mark" plain label="m" onPress={answeredByRegister} />
+        <Input key="reader-goto" label="go" onSubmit={() => {}} />
       </Box>
     )
 

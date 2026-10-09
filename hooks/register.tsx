@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { BookDetail, BookSummary, DockSnapshot, DoneBand, OutlineEntry, ReaderState } from '../types'
+import type { BookDetail, BookSummary, DockSnapshot, DoneBand, OutlineEntry, ReaderMode, ReaderPage, ReaderState } from '../types'
 import { badge, newTask, withBaseline } from './dock-logic.ts'
 import { registerDock } from './dock.tsx'
+import { isGraphicsTerminal, parseGoto, readerMode } from './reader-logic.ts'
 
 // The reader itself is a local web page (pdf.js) served by server/server.mjs on
 // 127.0.0.1. This module starts that server on demand, opens the book when a
@@ -17,6 +18,11 @@ const dock = atom({ plugin: 'book-reader', key: 'dock' } as const, null)
 const dockTask = atom({ plugin: 'book-reader', key: 'dockTask' } as const, null)
 const blink = atom({ plugin: 'book-reader', key: 'blink' } as const, false)
 const dockView = atom({ plugin: 'book-reader', key: 'dockView' } as const, 'main')
+// The dock's reader view (text mode): the page shown, when it landed, one line of news.
+const readerPage = atom({ plugin: 'book-reader', key: 'readerPage' } as const, null)
+const readerShownAt = atom({ plugin: 'book-reader', key: 'readerShownAt' } as const, null)
+const readerNote = atom({ plugin: 'book-reader', key: 'readerNote' } as const, null)
+const graphics = atom({ plugin: 'book-reader', key: 'graphics' } as const, false)
 
 const HELP = [
   '/book                 open the current book now (or pick one)',
@@ -25,6 +31,8 @@ const HELP = [
   '/book list            your books with progress; /book <n> switches to one',
   '/book close           close the reader window (your place is kept)',
   '/book dock            show the Reading Dock beside the transcript, or fold it to the status line',
+  '/book mode text|browser  read in the dock pane as text, or in the browser window',
+  '/book open browser    open the browser window at the current page, whatever the mode',
   '/book auto on|off     open the book by itself while a task runs',
   '/book delay <sec>     how long a task must run before the book opens',
   '/book status          what is set up',
@@ -35,6 +43,7 @@ type Config = {
   port: number
   base: string
   window: 'app' | 'browser'
+  mode: ReaderMode
   notify: boolean
   autoOpen: boolean
   openDelaySeconds: number
@@ -45,6 +54,7 @@ const cfg: Config = {
   port: 47321,
   base: 'http://127.0.0.1:47321',
   window: 'app',
+  mode: 'browser',
   notify: true,
   autoOpen: true,
   openDelaySeconds: 5,
@@ -64,6 +74,12 @@ const live: {
   dockPoll: Timer | null
   dockDismissed: boolean
   isFolded: boolean
+  /** The mode the server last reported, for when it does not answer. */
+  mode: ReaderMode | null
+  /** Counts page fetches: only the latest one's answer is shown. */
+  pageRequest: number
+  /** Why the reader server last failed to start, for /book status. */
+  startFailure: string | null
 } = {
   turnId: null,
   pendingOpen: null,
@@ -76,6 +92,9 @@ const live: {
   dockPoll: null,
   dockDismissed: false,
   isFolded: false,
+  mode: null,
+  pageRequest: 0,
+  startFailure: null,
 }
 
 /** Where this session runs, so the reader can bring it to the front. */
@@ -234,13 +253,19 @@ async function ensureServer($: EngineInterface): Promise<void> {
     if (!isOlderVersion(running.version, version)) return
     await stopServer($)
   }
-  const node = await findNode($)
-  const started = await $.process.run(
-    [node, `${$.plugin.root}/server/server.mjs`, '--daemon', '--port', String(cfg.port), '--launched-from', $.plugin.root],
-    { timeoutMs: 20_000 },
-  )
-  if (started.exitCode !== 0) {
-    throw new Error(`the reader server did not start: ${(started.stdout + started.stderr).trim().slice(0, 300)}`)
+  try {
+    const node = await findNode($)
+    const started = await $.process.run(
+      [node, `${$.plugin.root}/server/server.mjs`, '--daemon', '--port', String(cfg.port), '--launched-from', $.plugin.root],
+      { timeoutMs: 20_000 },
+    )
+    if (started.exitCode !== 0) {
+      throw new Error(`the reader server did not start: ${(started.stdout + started.stderr).trim().slice(0, 300)}`)
+    }
+    live.startFailure = null
+  } catch (error) {
+    live.startFailure = messageOf(error)
+    throw error
   }
 }
 
@@ -265,6 +290,16 @@ async function delaySeconds($: EngineInterface): Promise<number> {
   return Number.isFinite(value) && value >= 0 ? value : 5
 }
 
+// The server's setting wins over the config; with the server down, the last one it reported.
+function modeOf(state: ReaderState | null): ReaderMode {
+  if (state) live.mode = readerMode(state.settings?.mode, cfg.mode)
+  return live.mode ?? cfg.mode
+}
+
+async function currentMode($: EngineInterface): Promise<ReaderMode> {
+  return modeOf(await readerState($))
+}
+
 // ------------------------------------------------------------ the book
 
 function where(book: BookSummary): string {
@@ -279,10 +314,36 @@ async function show($: EngineInterface, page?: number): Promise<boolean> {
   return shown.shown
 }
 
-async function showBook($: EngineInterface): Promise<BookSummary | null> {
+// Shows the book where the mode says: the browser window, or the dock's reader
+// view at `page` (else the saved page). Null when there is no book. `asked` is
+// false from the auto-open timer: then a dock the person put away stays away.
+// `isCommand`: a command never awaits its own pane, so there the dock opens and
+// the page loads once the answer is out.
+async function present($: EngineInterface, page?: number, asked = true, isCommand = false): Promise<BookSummary | null> {
   await ensureServer($)
-  if (!(await show($))) return null
-  return (await readerState($))?.current ?? null
+  const state = await readerState($)
+  if (modeOf(state) === 'browser') {
+    if (!(await show($, page))) return null
+    return (await readerState($))?.current ?? null
+  }
+  const book = state?.current ?? null
+  if (!book) return null
+  if (asked) {
+    live.dockDismissed = false
+    live.isFolded = false
+  } else if (live.dockDismissed || live.isFolded) {
+    return book // the status line alone says where the book is
+  }
+  const showPage = async () => {
+    await openDock($)
+    // Unfolded: the badge leaves the status line, as with /book dock.
+    if (asked && live.turnId === null) await restStatus($)
+    await update($, dockView, () => 'reader')
+    await loadPage($, book, page ?? book.page)
+  }
+  if (isCommand) void showPage().catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
+  else await showPage()
+  return book
 }
 
 // ------------------------------------------------------------ the dock
@@ -347,6 +408,63 @@ function stopDockPoll(): void {
   live.dockPoll = null
 }
 
+// ------------------------------------------------------------ the reader view
+
+// Fetches one page into the reader view. A newer request wins over a late answer.
+async function loadPage($: EngineInterface, book: BookSummary, page: number): Promise<void> {
+  const request = ++live.pageRequest
+  await update($, readerNote, () => `Loading page ${page}…`)
+  try {
+    const answer = await api<Omit<ReaderPage, 'bookId' | 'fetchedAt'>>($, 'GET', `/api/books/${book.id}/page/${page}`)
+    if (request !== live.pageRequest) return
+    const now = await $.clock.now()
+    await update($, readerPage, () => ({ ...answer, bookId: book.id, fetchedAt: now }))
+    await update($, readerNote, () => answer.error ?? null)
+    await update($, readerShownAt, () => now)
+    await api($, 'POST', `/api/books/${book.id}/progress`, { page })
+    // The new page starts at its top; a pane that cannot scroll still shows the page.
+    await $.ui.scroll({ to: 'start', in: DOCK }).catch(error => $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' }))
+    await refreshDock($)
+  } catch (error) {
+    if (request !== live.pageRequest) return
+    await update($, readerNote, () => `Could not load page ${page}: ${messageOf(error)}`)
+  }
+}
+
+async function currentReaderBook($: EngineInterface): Promise<BookDetail | null> {
+  return (await read($, dock))?.current ?? null
+}
+
+async function turnPage($: EngineInterface, delta: number): Promise<void> {
+  const shown = await read($, readerPage)
+  const book = await currentReaderBook($)
+  if (!shown || !book) return
+  const page = shown.page + delta
+  if (page < 1 || page > shown.pages) return
+  await loadPage($, book, page)
+}
+
+async function gotoPage($: EngineInterface, input: string): Promise<void> {
+  const shown = await read($, readerPage)
+  const book = await currentReaderBook($)
+  if (!book) return
+  const page = parseGoto(input, shown?.pages ?? book.pages)
+  if (page === null) {
+    await update($, readerNote, () => `No page ${input.trim()}${shown ? `; the book has ${shown.pages}` : ''}`)
+    return
+  }
+  await loadPage($, book, page)
+}
+
+async function markRead($: EngineInterface): Promise<void> {
+  const shown = await read($, readerPage)
+  const book = await currentReaderBook($)
+  if (!shown || !book) return
+  const isRead = book.read.includes(shown.page)
+  await api($, 'POST', `/api/books/${book.id}/progress`, isRead ? { unread: [shown.page] } : { read: [shown.page] })
+  await refreshDock($)
+}
+
 // The status line between tasks: the badge while the dock is folded, else nothing.
 async function restStatus($: EngineInterface): Promise<void> {
   const current = live.isFolded ? (await read($, dock))?.current : null
@@ -378,18 +496,28 @@ async function dockPress($: EngineInterface, element: string): Promise<void> {
     await update($, dockTask, () => null)
     return
   }
+  if (element === 'reader-next') return turnPage($, 1)
+  if (element === 'reader-prev') return turnPage($, -1)
+  if (element === 'reader-mark') return markRead($)
+  if (element === 'reader-open') {
+    // The escape hatch: the browser at the page shown, whatever the mode.
+    const shown = await read($, readerPage)
+    await ensureServer($)
+    await show($, shown?.page)
+    startDockPoll($)
+    return
+  }
   const chapter = /^ch-(\d+)-\d+$/.exec(element)
   const book = /^book-([0-9a-f]{12})$/.exec(element)
   if (element === 'dock-open') {
-    await showBook($)
+    await present($)
   } else if (chapter) {
-    await ensureServer($)
-    await show($, Number(chapter[1]))
+    await present($, Number(chapter[1]))
   } else if (book) {
     await ensureServer($)
     await api($, 'POST', `/api/books/${book[1]}/select`)
     await update($, dockView, () => 'main')
-    await show($)
+    await present($)
     await refreshDock($)
   } else {
     return
@@ -411,10 +539,12 @@ async function openForTurn($: EngineInterface, id: string): Promise<void> {
       return
     }
     await api($, 'POST', '/api/task', { state: 'running', returnTo: await returnTarget($) })
-    await show($)
+    // In text mode present() opens the dock itself, unless it was put away.
+    const isBrowser = modeOf(state) === 'browser'
+    await present($, undefined, false)
     if (live.turnId !== id) return
     $.ui.status(`📖 ${state.current.title} · ${where(state.current)}`)
-    if (!live.dockDismissed && !live.isFolded) await openDock($)
+    if (isBrowser && !live.dockDismissed && !live.isFolded) await openDock($)
   } catch (error) {
     $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 })
   }
@@ -529,12 +659,27 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
     return seconds === 0 ? '📖 The book opens as soon as a task starts.' : `📖 The book opens once a task has run ${seconds}s.`
   }
 
+  if (verb === 'mode') {
+    const value = rest[0]?.toLowerCase()
+    if (value === undefined) return `Reading mode: ${await currentMode($)}. Use /book mode text|browser.`
+    if (value !== 'text' && value !== 'browser') return 'Use /book mode text|browser.'
+    await ensureServer($)
+    await api($, 'POST', '/api/settings', { mode: value })
+    live.mode = value
+    if (value === 'browser') await update($, dockView, view => (view === 'reader' ? 'main' : view))
+    return value === 'text'
+      ? '📖 Reading mode text: the book opens in the Reading Dock as text; o opens the browser.'
+      : '📖 Reading mode browser: the book opens in its own window.'
+  }
+
   if (verb === 'status') {
     const state = await readerState($)
     const lines = [
       `Auto-open: ${(await isAutoOpen($)) ? 'on' : 'off'}, after ${await delaySeconds($)}s of a task`,
+      `Reading mode: ${modeOf(state)}`,
       `Reader server: ${state ? `running on ${cfg.base}` : 'not running (starts when needed)'}`,
     ]
+    if (!state && live.startFailure) lines.push(`Last start failed: ${live.startFailure}`)
     if (state?.current) {
       const b = state.current
       lines.unshift(`📖 ${b.title} · ${where(b)} · ${b.readCount} pages read`, `   ${b.path}`)
@@ -591,28 +736,36 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
     const book = state.books[Number(verb) - 1]
     if (!book) return `No book number ${verb}; see /book list.`
     await api($, 'POST', `/api/books/${book.id}/select`)
-    const shown = await showBook($)
+    const shown = await present($, undefined, true, true)
     return `📖 Now reading “${book.title}” · ${where(shown ?? book)}`
   }
 
   if (verb === 'choose' || verb === 'pick') {
     const chosen = await api<{ cancelled?: boolean; book?: BookSummary }>($, 'POST', '/api/choose')
     if (chosen.cancelled || !chosen.book) return 'No book chosen.'
-    const shown = await showBook($)
+    const shown = await present($, undefined, true, true)
     return `📖 Now reading “${chosen.book.title}” · ${where(shown ?? chosen.book)}\n${await autoLine($)}`
+  }
+
+  if (verb === 'open' && rest[0]?.toLowerCase() === 'browser') {
+    const state = await api<ReaderState>($, 'GET', '/api/state')
+    if (!state.current) return 'No book chosen: /book choose'
+    await show($, (await read($, readerPage))?.page)
+    return `📖 ${state.current.title} · ${where(state.current)} · in the browser`
   }
 
   if (args === '' || verb === 'open') {
     const state = await api<ReaderState>($, 'GET', '/api/state')
     if (!state.current) return runBook($, 'choose')
-    const shown = await showBook($)
-    void openDockAsked($).catch(error => $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' }))
+    const shown = await present($, undefined, true, true)
+    // In text mode present() opens the dock already.
+    if (modeOf(state) === 'browser') void openDockAsked($).catch(error => $.ui.log(`book-reader: ${messageOf(error)}`, { to: 'debug' }))
     return `📖 ${state.current.title} · ${where(shown ?? state.current)}`
   }
 
   const path = await resolvePath($, args)
   const added = await api<{ book: BookSummary }>($, 'POST', '/api/books', { path })
-  const shown = await showBook($)
+  const shown = await present($, undefined, true, true)
   return `📖 Now reading “${added.book.title}” · ${where(shown ?? added.book)}\n${await autoLine($)}`
 }
 
@@ -676,6 +829,7 @@ export const register: Register = (on, options) => {
     port,
     base: `http://127.0.0.1:${port}`,
     window: options.window === 'browser' ? 'browser' : 'app',
+    mode: options.mode === 'text' ? 'text' : 'browser',
     notify: options.notify !== false,
     autoOpen: options.autoOpen !== false,
     openDelaySeconds: Number.isFinite(delay) && delay >= 0 ? delay : 5,
@@ -689,9 +843,17 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'book',
       description: 'Book reader: pick a PDF, open or close it, list books, auto-open on/off',
-      argumentHint: '[choose | <file.pdf> | list | <n> | close | dock | auto on|off | delay <s> | status | restart]',
+      argumentHint: '[choose | <file.pdf> | list | <n> | close | dock | mode text|browser | auto on|off | delay <s> | status | restart]',
       immediate: true,
     })
+    // Pictures in the reader view: drawn where the terminal speaks kitty graphics.
+    const env = {
+      TERM_PROGRAM: await $.env.get('TERM_PROGRAM'),
+      TERM: await $.env.get('TERM'),
+      KITTY_WINDOW_ID: await $.env.get('KITTY_WINDOW_ID'),
+      GHOSTTY_RESOURCES_DIR: await $.env.get('GHOSTTY_RESOURCES_DIR'),
+    }
+    await update($, graphics, () => isGraphicsTerminal(env))
     return next(e)
   })
 
@@ -765,6 +927,12 @@ export const register: Register = (on, options) => {
   on('ui.press', { requestId: DOCK }, async ($, e, next) => {
     const result = await next(e)
     await dockPress($, e.element).catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
+    return result
+  })
+
+  on('ui.input', { requestId: DOCK, element: 'reader-goto' }, async ($, e, next) => {
+    const result = await next(e)
+    if (e.kind === 'submit') await gotoPage($, e.value).catch(error => $.ui.toast(`book-reader: ${messageOf(error)}`, { timeoutMs: 7000 }))
     return result
   })
 
