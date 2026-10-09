@@ -192,6 +192,9 @@ describe('reading through a task', () => {
     await clock.advance(2_000)
     expect(progress()).toContainEqual({ read: [43] })
     expect(progress().filter(b => JSON.stringify(b) === '{"read":[43]}')).toHaveLength(1)
+    // A page already read is not posted again on the next tick.
+    await clock.advance(2_000)
+    expect(progress().filter(b => JSON.stringify(b) === '{"read":[43]}')).toHaveLength(1)
     await ui.unmount()
   })
 
