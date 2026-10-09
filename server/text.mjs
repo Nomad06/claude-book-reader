@@ -14,3 +14,8 @@ export function plainText(text) {
 export function cleanRun(text) {
   return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
 }
+
+/** Outline entries with their nesting level held to `max`: deeper than that is no real contents. */
+export function clampLevels(list, max = 9) {
+  return list.map(entry => ({ ...entry, level: Math.min(entry.level, max) }))
+}

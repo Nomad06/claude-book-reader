@@ -12,6 +12,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildPdf, buildScannedPdf, TEXT } from './pdf-fixture.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER = path.join(ROOT, 'server', 'server.mjs')
@@ -131,6 +132,8 @@ before(async () => {
   port = await freePort()
   dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'book-reader-data-'))
   fixtures = await fs.mkdtemp(path.join(os.tmpdir(), 'book-reader-books-'))
+  await fs.mkdir(path.join(dataDir, 'pages'), { recursive: true })
+  await fs.writeFile(path.join(dataDir, 'pages', 'left-over.rgb'), 'x')
   child = spawn(process.execPath, [SERVER, '--port', String(port), '--data', dataDir, '--no-launch', '--launched-from', 'test install'], {
     stdio: ['ignore', 'ignore', 'inherit'],
   })
@@ -152,6 +155,12 @@ describe('health', () => {
     assert.equal(res.json.version, MANIFEST.version)
     assert.equal(res.json.root, ROOT)
     assert.equal(res.json.launchedFrom, 'test install')
+  })
+})
+
+describe('start', () => {
+  test('sweeps the pages folder at start', async () => {
+    assert.equal(await fs.stat(path.join(dataDir, 'pages', 'left-over.rgb')).catch(() => null), null)
   })
 })
 
@@ -444,6 +453,99 @@ describe('dock', () => {
     const book = (await request('GET', `/api/books/${id}`)).json
     assert.equal(book.page, 100)
     assert.equal(book.location, null)
+  })
+})
+
+describe('text mode', () => {
+  async function addRealPdf(name, bytes) {
+    const file = path.join(fixtures, name)
+    await fs.writeFile(file, bytes)
+    const { json } = await request('POST', '/api/books', { body: { path: file } })
+    return json.book.id
+  }
+
+  test('mode is a setting, absent until set, browser or text only', async () => {
+    assert.equal((await request('GET', '/api/state')).json.settings.mode, undefined)
+    const bad = await request('POST', '/api/settings', { body: { mode: 'carrier-pigeon' } })
+    assert.equal(bad.json.settings.mode, undefined)
+    const set = await request('POST', '/api/settings', { body: { mode: 'text' } })
+    assert.equal(set.json.settings.mode, 'text')
+    assert.equal((await request('GET', '/api/state')).json.settings.mode, 'text')
+    await request('POST', '/api/settings', { body: { mode: 'browser' } })
+    assert.equal((await request('GET', '/api/state')).json.settings.mode, 'browser')
+  })
+
+  test('a page comes back as blocks; the first call fills pages, outline and profile', async () => {
+    const id = await addRealPdf('real.pdf', buildPdf(TEXT))
+    assert.equal((await request('GET', `/api/books/${id}`)).json.pages, null)
+    const res = await request('GET', `/api/books/${id}/page/1`)
+    assert.equal(res.status, 200)
+    assert.equal(res.json.page, 1)
+    assert.equal(res.json.pages, 2)
+    assert.equal(res.json.scanned, false)
+    assert.equal(res.json.blocks[0].kind, 'heading')
+    // Standard (non-embedded) fonts carry no name in Node, so no bold flag here; embedded fonts do.
+    assert.deepEqual(res.json.blocks[0].runs, [{ text: 'Chapter One' }])
+    assert.equal(res.json.blocks[1].kind, 'para')
+    assert.equal(res.json.blocks[1].runs[0].text, 'Hello world, this is body text. Second line of the paragraph continues here.')
+    const book = (await request('GET', `/api/books/${id}`)).json
+    assert.equal(book.pages, 2)
+    assert.deepEqual(book.outline, [
+      { title: 'Chapter One', page: 1, level: 0 },
+      { title: 'Chapter Two', page: 2, level: 0 },
+    ])
+    assert.equal(book.textProfile.bodySize, 10)
+  })
+
+  test('a text page is never reported as scanned, and code is a code block', async () => {
+    const id = await addRealPdf('code.pdf', buildPdf(TEXT))
+    const res = await request('GET', `/api/books/${id}/page/2`)
+    assert.equal(res.json.scanned, false)
+    assert.deepEqual(res.json.blocks[0], { kind: 'code', text: 'const x = 1\n  return x' })
+  })
+
+  test('a scanned page is one image block, its file under the data folder', async () => {
+    const id = await addRealPdf('scan.pdf', buildScannedPdf())
+    const res = await request('GET', `/api/books/${id}/page/1`)
+    assert.equal(res.json.scanned, true)
+    assert.equal(res.json.blocks.length, 1)
+    assert.equal(res.json.blocks[0].kind, 'image')
+    assert.ok(res.json.blocks[0].file.startsWith(path.join(dataDir, 'pages')))
+    assert.equal(res.json.blocks[0].alt, 'Image 32×32')
+  })
+
+  test('an outline title from the PDF loses its control characters', async () => {
+    const id = await addRealPdf('esc-outline.pdf', buildPdf([{ outline: 'Red\u001b[31m Chapter', lines: [{ text: 'Body text here.' }] }]))
+    assert.equal((await request('GET', `/api/books/${id}/page/1`)).status, 200)
+    const book = (await request('GET', `/api/books/${id}`)).json
+    assert.equal(book.outline.length, 1)
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(book.outline[0].title))
+  })
+
+  test('pages outside the book, a missing file and a broken PDF', async () => {
+    const id = await addRealPdf('range.pdf', buildPdf(TEXT))
+    assert.equal((await request('GET', `/api/books/${id}/page/3`)).status, 404)
+    assert.equal((await request('GET', `/api/books/${id}/page/0`)).status, 404)
+    assert.equal((await request('GET', `/api/books/${id}/page/x`)).status, 404)
+    assert.equal((await request('GET', `/api/books/000000000000/page/1`)).status, 404)
+    const broken = await addRealPdf('broken.pdf', Buffer.from('%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n'))
+    const res = await request('GET', `/api/books/${broken}/page/1`)
+    assert.equal(res.status, 422)
+    assert.match(res.json.error, /cannot open the PDF/)
+    await fs.rm(path.join(fixtures, 'range.pdf'))
+    const gone = await request('GET', `/api/books/${id}/page/1`)
+    assert.equal(gone.status, 404)
+    assert.equal(gone.json.error, 'file missing')
+  })
+})
+
+describe('outline levels', () => {
+  test('levels are clamped to 9 so a deep outline never fails the page route', async () => {
+    const { clampLevels } = await import('../server/text.mjs')
+    assert.deepEqual(
+      clampLevels([{ title: 'a', page: 1, level: 14 }, { title: 'b', page: 2, level: 3 }]),
+      [{ title: 'a', page: 1, level: 9 }, { title: 'b', page: 2, level: 3 }],
+    )
   })
 })
 

@@ -28,7 +28,9 @@ import {
   notification,
 } from './platform.mjs'
 import { nodeVersionProblem } from './node-version.mjs'
-import { plainText } from './text.mjs'
+import { clampLevels, plainText } from './text.mjs'
+import { createPdfSource, sweepImages } from './pdf-source.mjs'
+import { calibrate, pageBlocks } from './page-blocks.mjs'
 
 // Before anything else: pdf.js (text mode) needs a recent node. The mod shows
 // this line when the server fails to start.
@@ -54,6 +56,12 @@ const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`])
 const CAN_LAUNCH = !args['no-launch']
 const LAUNCHED_FROM = typeof args['launched-from'] === 'string' ? args['launched-from'] : null
 const PROFILE_DIR = path.join(DATA_DIR, 'reader-profile')
+const PAGES_DIR = path.join(DATA_DIR, 'pages')
+const PAGE_CACHE_MAX = 50
+
+// Text mode: pdf.js in this process, pictures as raw RGB files under PAGES_DIR.
+const source = createPdfSource({ vendorDir: path.join(VIEWER_DIR, 'vendor', 'pdfjs'), imagesDir: PAGES_DIR })
+const pageCache = new Map() // `${bookId}:${page}` -> answer
 
 // Sent with every response: no other site may embed or sniff what this server serves.
 const BASE_HEADERS = {
@@ -544,6 +552,59 @@ function cleanOutline(body, pages) {
   })
 }
 
+// ---------------------------------------------------------------- text mode
+
+// One page as blocks. The first page of a book also fills what the browser
+// viewer would have reported (page count, contents) and calibrates the book.
+async function pageOf(book, n) {
+  if (!fs.existsSync(book.path)) throw httpError(404, 'file missing')
+  let doc
+  try {
+    doc = await source.open(book)
+  } catch (error) {
+    throw httpError(422, `cannot open the PDF: ${error.message}`)
+  }
+  if (!Number.isInteger(n) || n < 1 || n > doc.pages) throw httpError(404, `no page ${n}; the book has ${doc.pages}`)
+  let changed = false
+  if (!book.pages) {
+    book.pages = doc.pages
+    changed = true
+  }
+  if (!book.outline) {
+    try {
+      book.outline = cleanOutline({ outline: clampLevels(await doc.outline()) }, book.pages)
+    } catch {
+      book.outline = []
+    }
+    changed = true
+  }
+  if (!book.textProfile) {
+    try {
+      book.textProfile = calibrate(await doc.samples(12))
+    } catch {
+      book.textProfile = calibrate([])
+    }
+    changed = true
+  }
+  if (changed) scheduleSave()
+
+  const key = `${book.id}:${n}`
+  const cached = pageCache.get(key)
+  if (cached) return cached
+  let answer
+  try {
+    const { items, images, width, height } = await doc.pageContent(n)
+    const blocks = pageBlocks(items, images, book.textProfile)
+    const scanned = items.every(item => !item.text.trim()) && images.some(img => img.w * img.h >= 0.5 * width * height)
+    answer = { page: n, pages: doc.pages, blocks, scanned }
+  } catch (error) {
+    answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: plainText(String(error?.message ?? error)).slice(0, 300) }
+  }
+  pageCache.set(key, answer)
+  if (pageCache.size > PAGE_CACHE_MAX) pageCache.delete(pageCache.keys().next().value)
+  return answer
+}
+
 async function route(req, res) {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
   const p = url.pathname
@@ -578,6 +639,12 @@ async function route(req, res) {
     const chosen = await chooseFile()
     if (chosen === null) return sendJson(res, 200, { cancelled: true })
     return sendJson(res, 200, { book: summary(await addBook(chosen)) })
+  }
+
+  const pageMatch = /^\/api\/books\/([0-9a-f]{12})\/page\/([^/]{1,12})$/.exec(p)
+  if (pageMatch && m === 'GET') {
+    const n = /^\d{1,6}$/.test(pageMatch[2]) ? Number(pageMatch[2]) : NaN
+    return sendJson(res, 200, await pageOf(requireBook(pageMatch[1]), n))
   }
 
   const bookMatch = /^\/api\/books\/([0-9a-f]{12})(\/[a-z]+)?$/.exec(p)
@@ -623,6 +690,7 @@ async function route(req, res) {
     const body = await readBody(req)
     if (['light', 'sepia', 'dark'].includes(body.theme)) state.settings.theme = body.theme
     if (Number.isFinite(body.readSeconds)) state.settings.readSeconds = Math.min(120, Math.max(1, body.readSeconds))
+    if (body.mode === 'browser' || body.mode === 'text') state.settings.mode = body.mode
     scheduleSave()
     return sendJson(res, 200, { settings: state.settings })
   }
@@ -699,6 +767,7 @@ async function route(req, res) {
 
   if (p === '/api/shutdown' && m === 'POST') {
     sendJson(res, 200, { ok: true })
+    await Promise.race([source.closeAll(), sleep(2000)])
     await saveNow()
     setTimeout(() => process.exit(0), 50)
     return
@@ -709,6 +778,8 @@ async function route(req, res) {
 
 async function serve() {
   state = await loadState()
+  fs.mkdirSync(PAGES_DIR, { recursive: true, mode: 0o700 })
+  await sweepImages(PAGES_DIR, 0)
   const server = http.createServer((req, res) => {
     route(req, res).catch(error => {
       if (res.headersSent) return res.end()
@@ -728,7 +799,7 @@ async function serve() {
   setInterval(() => {
     if (clients.size === 0 && Date.now() - lastActivity > IDLE_EXIT_MS) {
       console.error('[book-reader] idle, exiting')
-      saveNow().finally(() => process.exit(0))
+      Promise.race([source.closeAll(), sleep(2000)]).then(saveNow).finally(() => process.exit(0))
     }
   }, 60_000).unref()
   for (const signal of ['SIGTERM', 'SIGINT']) {
