@@ -86,8 +86,11 @@ export function buildPdf(pages, { width = 612, height = 792 } = {}) {
   return finish(objects, catalogId)
 }
 
-/** A one-page PDF whose only content is a mid-gray RGB image covering the page. */
-export function buildScannedPdf({ width = 612, height = 792, pixels = 32, copies = 1 } = {}) {
+/**
+ * A PDF whose pages each show only a mid-gray RGB image covering the page. All
+ * pages share the one image object, as a book's repeated logo or rule does.
+ */
+export function buildScannedPdf({ width = 612, height = 792, pixels = 32, copies = 1, pages = 1 } = {}) {
   const objects = []
   const add = body => (objects.push(body), objects.length)
   const catalogId = add('')
@@ -98,10 +101,12 @@ export function buildScannedPdf({ width = 612, height = 792, pixels = 32, copies
   )
   const stream = Array.from({ length: copies }, () => `q ${width} 0 0 ${height} 0 0 cm /Im1 Do Q`).join('\n')
   const contentId = add(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)
-  const pageId = add(
-    `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im1 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+  const pageIds = Array.from({ length: pages }, () =>
+    add(
+      `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im1 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+    ),
   )
-  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${pages} >>`
   objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`
   return finish(objects, catalogId)
 }

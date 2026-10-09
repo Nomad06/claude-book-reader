@@ -11,6 +11,7 @@ export const MAX_IMAGE_HEIGHT = 4096 // the terminal engine's Image limit
 export const MAX_IMAGE_FILES = 200
 export const MAX_PAGE_IMAGES = 40 // pictures written for one page: a page never sweeps its own files
 const MIN_IMAGE_SIDE = 24
+const IMAGE_WAIT_MS = 10_000
 const MAX_OUTLINE = 2000
 
 // pdf.js warns once at import that it cannot render (no canvas, no DOMMatrix,
@@ -221,8 +222,7 @@ async function imagesOf(pdf, page, ops, prefix, imagesDir) {
   const images = []
   for (const [k, hit] of found.entries()) {
     if (images.length >= MAX_PAGE_IMAGES) break
-    const img =
-      typeof hit.source === 'string' ? await new Promise(resolve => page.objs.get(hit.source, resolve)).catch(() => null) : hit.source
+    const img = typeof hit.source === 'string' ? await imageObject(page, hit.source) : hit.source
     if (!img || !img.data || img.width < MIN_IMAGE_SIDE || img.height < MIN_IMAGE_SIDE) continue
     const rgb = toRgb(img)
     if (!rgb) continue
@@ -234,6 +234,21 @@ async function imagesOf(pdf, page, ops, prefix, imagesDir) {
   }
   if (images.length > 0) await sweepImages(imagesDir, MAX_IMAGE_FILES)
   return images
+}
+
+// pdf.js keeps an image used on several pages in the document's commonObjs under
+// a `g_` id, and the rest in the page's objs; asking the wrong one never answers.
+// A picture pdf.js never delivers is skipped after IMAGE_WAIT_MS, so it cannot
+// hold the page up.
+function imageObject(page, id) {
+  const objs = id.startsWith('g_') ? page.commonObjs : page.objs
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), IMAGE_WAIT_MS)
+    objs.get(id, img => {
+      clearTimeout(timer)
+      resolve(img)
+    })
+  })
 }
 
 /** pdf.js image data (kind 1 gray 1-bit, 2 RGB, 3 RGBA) as packed RGB, or null. */

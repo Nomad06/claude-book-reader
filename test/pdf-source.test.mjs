@@ -152,6 +152,20 @@ describe('images', () => {
     assert.equal((await fs.readFile(img.file))[0], 0x80)
   })
 
+  test('an image shared by many pages is read on every page', async () => {
+    // pdf.js keeps an image used on several pages in commonObjs, not page.objs.
+    const doc = await source.open(await write('shared.pdf', buildScannedPdf({ pages: 4 })))
+    for (let n = 1; n <= 4; n++) {
+      let timer
+      const { images } = await Promise.race([
+        doc.pageContent(n),
+        new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`page ${n} never answered`)), 5000))),
+      ]).finally(() => clearTimeout(timer))
+      assert.equal(images.length, 1, `page ${n}`)
+      assert.equal((await fs.stat(images[0].file)).size, 32 * 32 * 3)
+    }
+  })
+
   test('toRgb handles RGB, RGBA and 1-bit gray', () => {
     assert.deepEqual([...toRgb({ kind: 2, width: 1, height: 1, data: Uint8Array.of(1, 2, 3) })], [1, 2, 3])
     assert.deepEqual([...toRgb({ kind: 3, width: 1, height: 1, data: Uint8Array.of(1, 2, 3, 255) })], [1, 2, 3])
