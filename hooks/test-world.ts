@@ -1,8 +1,8 @@
 import { mock } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import type { On, UiScrollArgs } from 'claude-code'
 
-import type { BookSummary, OutlineEntry } from '../types'
+import type { BookSummary, OutlineEntry, ReaderPage } from '../types'
 
 /** The `$` and `on` a test body receives. */
 export type TestDollar = Parameters<TestBody>[0]
@@ -27,6 +27,14 @@ export type Reader = {
   /** The current book's read pages and contents, as GET /api/books/:id answers. */
   read?: number[]
   outline?: OutlineEntry[] | null
+  /** The server's stored mode; absent until set. */
+  mode?: 'browser' | 'text'
+  /** Page answers by number; a page not listed answers one paragraph "Page N text." */
+  pages?: Record<number, Partial<Pick<ReaderPage, 'blocks' | 'scanned' | 'error' | 'pages'>>>
+  /** Pages the current book has marked read (progress posts land here). */
+  readPages?: number[]
+  /** Pages whose answer waits until the test calls `release(n)` (for racing tests). */
+  holdPages?: number[]
 }
 
 export type Host = {
@@ -43,6 +51,8 @@ export type Host = {
   windowPid?: string
   /** Whether a pane the mod opens is drawn (a fullscreen terminal wide enough). */
   placesPanes?: boolean
+  /** Whether the dock pane is the one in front (default true). */
+  shownPane?: boolean
 }
 
 const ok = (stdout: string, exitCode = 0) => ({
@@ -55,6 +65,12 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   const host = { os: 'unix', cwd: '/home/me/project', files: [], ...hostOptions }
   const calls: Call[] = []
   const runs: string[][] = []
+  const scrolls: UiScrollArgs[] = []
+  const held = new Map<number, () => void>()
+  const release = (n: number) => {
+    held.get(n)?.()
+    held.delete(n)
+  }
   const task = { state: 'idle', seq: 0, acked: true }
   let pluginRoot = ''
   const baseEnv = host.os === 'windows' ? { OS: 'Windows_NT', ProgramFiles: 'C:\\Program Files' } : {}
@@ -85,8 +101,14 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
     return { value: isPlaced ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'narrow' } }
   })
   on('ui.panes', () => ({
-    value: panes.map(pane => ({ ...pane, title: 'Book Reader', isShown: true, isFocused: false })),
+    value: panes.map(pane => ({ ...pane, title: 'Book Reader', isShown: host.shownPane !== false, isFocused: false })),
   }))
+  on('ui.scroll', ($, e) => {
+    // The test engine raises the event with the arguments of `$.ui.scroll` as given
+    // (`to`, `in`, `block`); it resolves no window, so `requestId` and `offset` are absent.
+    scrolls.push({ ...(e as unknown as UiScrollArgs) })
+    return {}
+  })
   on('ui.close', ($, e) => {
     const at = panes.findIndex(pane => pane.id === e.id)
     if (at >= 0) panes.splice(at, 1)
@@ -124,10 +146,22 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
         return json({ ok: true })
       case '/api/state': {
         const current = { ...BOOK, ...reader.book }
-        return json({ current: reader.hasBook ? current : null, books: [current], viewers: reader.viewers, task })
+        const settings = { theme: 'light', readSeconds: 6, ...(reader.mode ? { mode: reader.mode } : {}) }
+        return json({ current: reader.hasBook ? current : null, books: [current], viewers: reader.viewers, task, settings })
       }
+      case '/api/settings':
+        if (body?.mode === 'text' || body?.mode === 'browser') reader.mode = body.mode
+        return json({ settings: { theme: 'light', readSeconds: 6, mode: reader.mode } })
+      case `/api/books/${BOOK.id}/progress`: {
+        if (Array.isArray(body?.read)) reader.readPages = [...new Set([...(reader.readPages ?? []), ...(body.read as number[])])]
+        if (Array.isArray(body?.unread)) reader.readPages = (reader.readPages ?? []).filter(p => !(body.unread as number[]).includes(p))
+        if (typeof body?.page === 'number') reader.book = { ...reader.book, page: body.page }
+        return json({ ok: true, readCount: reader.readPages?.length ?? 0 })
+      }
+      case `/api/books/${BOOK.id}/select`:
+        return json({ book: { ...BOOK, ...reader.book } })
       case `/api/books/${BOOK.id}`:
-        return json({ ...BOOK, ...reader.book, read: reader.read ?? [], outline: reader.outline ?? null })
+        return json({ ...BOOK, ...reader.book, read: reader.readPages ?? reader.read ?? [], outline: reader.outline ?? null })
       case '/api/books':
         return json({ book: { ...BOOK, path: body?.path } })
       case '/api/show':
@@ -141,13 +175,22 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
       case '/api/close':
         reader.viewers = 0
         return json({ closed: 1 })
-      default:
+      default: {
+        const page = new RegExp(`^/api/books/${BOOK.id}/page/(\\d+)$`).exec(url.pathname)
+        if (page) {
+          const n = Number(page[1])
+          const given = reader.pages?.[n] ?? {}
+          const answer = json({ page: n, pages: BOOK.pages, blocks: [{ kind: 'para', runs: [{ text: `Page ${n} text.` }] }], scanned: false, ...given })
+          if (reader.holdPages?.includes(n)) return new Promise<typeof answer>(resolve => held.set(n, () => resolve(answer)))
+          return answer
+        }
         return json({})
+      }
     }
   })
   const posted = (path: string) => calls.filter(c => c.method === 'POST' && c.path === path)
   const daemon = () => runs.find(argv => argv.includes('--daemon'))
-  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses }
+  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses, scrolls, release }
 }
 
 export const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const
