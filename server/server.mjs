@@ -28,6 +28,7 @@ import {
   notification,
 } from './platform.mjs'
 import { nodeVersionProblem } from './node-version.mjs'
+import { plainText } from './text.mjs'
 
 // Before anything else: pdf.js (text mode) needs a recent node. The mod shows
 // this line when the server fails to start.
@@ -521,17 +522,6 @@ function mergeProgress(book, body) {
   book.read = [...read].sort((a, b) => a - b)
   book.updatedAt = Date.now()
   scheduleSave()
-}
-
-// Titles come from PDFs (untrusted) and end up drawn in a terminal: line breaks
-// become spaces and every other control character (ESC, BEL, C1) is dropped, so
-// no title carries escape sequences.
-function plainText(text) {
-  return text
-    .replace(/[\r\n\t]+/g, ' ')
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-    .replace(/ {2,}/g, ' ')
-    .trim()
 }
 
 // The contents the reader found in the PDF, for the dock in Claude Code.
