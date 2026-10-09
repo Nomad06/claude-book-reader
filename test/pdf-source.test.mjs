@@ -25,7 +25,7 @@ import {
 } from '../server/pdf-source.mjs'
 import { pageBlocks } from '../server/page-blocks.mjs'
 import { cleanRun, errorLine, plainText } from '../server/text.mjs'
-import { shared } from '../server/shared.mjs'
+import { shared, tryAgain } from '../server/shared.mjs'
 import { TEXT, buildDrawingPdf, buildPdf, buildScannedPdf } from './pdf-fixture.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -298,6 +298,17 @@ describe('bounds', () => {
     assert.equal(map.size, 0)
     await shared(map, 'a', work)
     assert.equal(runs, 2)
+  })
+
+  test('a degraded answer is tried again at most `max` times, then kept; the counts stay few', () => {
+    const counts = new Map()
+    // A page whose figure always times out: two more tries, then its answer is kept like any other.
+    assert.deepEqual([tryAgain(counts, 'b:7', 2), tryAgain(counts, 'b:7', 2), tryAgain(counts, 'b:7', 2)], [true, true, false])
+    assert.equal(counts.has('b:7'), false, 'kept: its count goes')
+    assert.equal(tryAgain(counts, 'b:7', 2), true, 'evicted from the cache later, it gets its tries again')
+    for (let n = 0; n < 500; n++) tryAgain(counts, `b:${n}`, 2, 50)
+    assert.ok(counts.size <= 50, `${counts.size} counts`)
+    assert.equal(counts.has('b:499'), true, 'the newest stay')
   })
 
   test('an error message is one short plain line', () => {

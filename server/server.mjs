@@ -29,7 +29,7 @@ import {
 } from './platform.mjs'
 import { nodeVersionProblem } from './node-version.mjs'
 import { clampLevels, errorLine, plainText } from './text.mjs'
-import { shared } from './shared.mjs'
+import { shared, tryAgain } from './shared.mjs'
 import { createPdfSource, sweepImages, withFigures } from './pdf-source.mjs'
 import { calibrate, isScanned, pageBlocks } from './page-blocks.mjs'
 
@@ -63,6 +63,8 @@ const PAGE_CACHE_MAX = 50
 // Text mode: pdf.js in this process, pictures as raw RGB files under PAGES_DIR.
 const source = createPdfSource({ vendorDir: path.join(VIEWER_DIR, 'vendor', 'pdfjs'), imagesDir: PAGES_DIR })
 const pageCache = new Map() // `${bookId}:${page}` -> answer
+const FIGURE_RETRIES = 2 // more tries for a page whose figure failed or ran out of time, then its answer is kept
+const figureTries = new Map() // `${bookId}:${page}` -> tries so far, at most PAGE_CACHE_MAX pages
 
 // Sent with every response: no other site may embed or sniff what this server serves.
 const BASE_HEADERS = {
@@ -588,8 +590,10 @@ async function pageOf(book, n) {
     } catch (error) {
       answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: errorLine(error) }
     }
-    // A failure may pass (a full disk, a folder gone, a figure that rendered too slowly): the next request tries again.
-    if (answer.error || retry) return answer
+    // A failure may pass (a full disk, a folder gone): the next request tries again. So may a figure that rendered
+    // too slowly, but rendering costs seconds of CPU: after FIGURE_RETRIES more tries that answer is kept.
+    if (answer.error || (retry && tryAgain(figureTries, key, FIGURE_RETRIES, PAGE_CACHE_MAX))) return answer
+    figureTries.delete(key)
     pageCache.set(key, answer)
     if (pageCache.size > PAGE_CACHE_MAX) pageCache.delete(pageCache.keys().next().value)
     return answer
