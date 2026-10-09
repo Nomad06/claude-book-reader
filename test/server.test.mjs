@@ -514,6 +514,16 @@ describe('text mode', () => {
     assert.equal(res.json.blocks[0].alt, 'Image 32×32')
   })
 
+  test('a cached page whose picture file was swept is extracted again', async () => {
+    const id = await addRealPdf('swept.pdf', buildScannedPdf())
+    const first = await request('GET', `/api/books/${id}/page/1`)
+    const file = first.json.blocks[0].file
+    await fs.rm(file)
+    const second = await request('GET', `/api/books/${id}/page/1`)
+    assert.equal(second.json.blocks[0].kind, 'image')
+    assert.ok(await fs.stat(second.json.blocks[0].file).catch(() => null))
+  })
+
   test('an outline title from the PDF loses its control characters', async () => {
     const id = await addRealPdf('esc-outline.pdf', buildPdf([{ outline: 'Red\u001b[31m Chapter', lines: [{ text: 'Body text here.' }] }]))
     assert.equal((await request('GET', `/api/books/${id}/page/1`)).status, 200)

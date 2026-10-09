@@ -590,7 +590,8 @@ async function pageOf(book, n) {
 
   const key = `${book.id}:${n}`
   const cached = pageCache.get(key)
-  if (cached) return cached
+  // pdf.js's image sweep may have removed a cached page's pictures; such an answer is extracted again.
+  if (cached && cached.blocks.every(block => block.kind !== 'image' || fs.existsSync(block.file))) return cached
   let answer
   try {
     const { items, images, width, height } = await doc.pageContent(n)
