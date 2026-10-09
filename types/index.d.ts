@@ -70,6 +70,8 @@ export type Block =
   | { kind: 'toc'; runs: Run[]; page: string; level: 1 | 2 | 3 }
   | { kind: 'code'; text: string }
   | { kind: 'image'; file: string; width: number; height: number; alt: string }
+  /** A figure drawn with paths the server did not render (no canvas installed, or too slow): alt is its caption. */
+  | { kind: 'drawing'; alt: string }
 
 /** `GET /api/books/:id/page/:n`, plus which book and when it was fetched. */
 export type ReaderPage = {

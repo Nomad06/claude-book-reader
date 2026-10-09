@@ -1,6 +1,7 @@
 // Pure: pdf.js text items of one page → blocks the dock draws (headings,
-// paragraphs, lists, captions, contents lines, code, images). Heuristics on
-// size, font and position; no pdf.js here, so this is tested on plain data.
+// paragraphs, lists, captions, contents lines, code, images), and the places
+// of figures drawn with paths, for the server to render. Heuristics on size,
+// font and position; no pdf.js here, so this is tested on plain data.
 
 import { cleanRun } from './text.mjs'
 
@@ -8,6 +9,7 @@ export const MAX_PAGE_CHARS = 20000
 const HEADING_RATIO = 1.15
 const LIST_MARK = /^(?:[•◦▪●\-–—]|\d{1,3}[.)])\s+\S/
 const CAPTION = /^(?:Figure|Fig\.|Table|Listing|Example|Рис\.|Рисунок|Таблица|Листинг|Пример)\s+\d/i
+const FIGURE_CAPTION = /^(?:Figure|Fig\.|Рис\.|Рисунок)\s+\d/i
 const BOLD = /bold|semibold|black|heavy/i
 const ITALIC = /italic|oblique/i
 
@@ -47,6 +49,15 @@ const MAX_SIZE = 1000
 const MAX_INDENT = 80
 const MAX_BLANK_LINES = 5
 const MAX_IMAGES = 200
+const MAX_DRAWINGS = 5000
+const MAX_FIGURES = 20 // figure marks on one page; the server renders a few and shows the rest as a line
+
+// A figure drawn with paths sits between the line above its caption and the caption: at least this many
+// body lines tall, with a drawing in it. The region keeps clear of both lines' glyphs.
+const FIGURE_MIN_LINES = 2
+const FIGURE_PAD = 3 // pt around the drawing
+const DESCENT = 0.3 // × size below a baseline
+const RULE_HEIGHT = 1.5 // pt: a box no taller is a rule
 
 /** Items with finite position and a usable size; width and text made safe; at most MAX_ITEMS. */
 function sane(items) {
@@ -225,10 +236,14 @@ export function isScanned(items, images, width, height) {
  * `folioOffset`, the running head and folio that print this page's number are
  * dropped by position on every page, not only those calibrated.
  */
-export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, top, bottom, pageNumber } = {}) {
+export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, top, bottom, pageNumber, drawings = [] } = {}) {
   const body = profile?.bodySize ?? 10
   const headers = profile?.headers ?? []
-  const kept = linesOf(items).filter(line => cleanRun(line.text).trim() !== '' && !isHeader(line, headers))
+  // Every line with text, running heads too: a figure's region stops below whatever is printed above it.
+  const printed = linesOf(items).filter(line => cleanRun(line.text).trim() !== '')
+  const kept = printed.filter(line => !isHeader(line, headers))
+  const boxes = saneBoxes(drawings)
+  let figures = 0
   markContents(kept)
   const lines = withoutRunning(kept, { top, bottom, pageNumber, body, folioOffset: profile?.folioOffset })
   const frame = { left: lines.reduce((m, l) => Math.min(m, l.x), Infinity), right: maxOf(lines, l => l.right) }
@@ -295,7 +310,17 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
       blocks.push({ kind: 'heading', level: Math.min(3, headingSizes.indexOf(round(line.size)) + 1), runs: runsOf(line.items) })
     } else if (CAPTION.test(text)) {
       flush()
-      blocks.push({ kind: 'caption', runs: runsOf(line.items) })
+      const runs = runsOf(line.items)
+      // A figure caption with no picture right above it: the drawing above, if any, is the figure.
+      const upright = line.items.every(it => it.upright !== false)
+      if (FIGURE_CAPTION.test(text) && upright && blocks.at(-1)?.kind !== 'image' && figures < MAX_FIGURES) {
+        const region = figureRegion(line, printed, boxes, body, top)
+        if (region) {
+          figures++
+          blocks.push({ kind: 'figure', alt: runs.map(r => r.text).join('').slice(0, 80), region })
+        }
+      }
+      blocks.push({ kind: 'caption', runs })
     } else if (LIST_MARK.test(text)) {
       flush()
       open = start('list', line, { markerX: line.x })
@@ -327,9 +352,63 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
 
 /** A block that says something: no text block without text. */
 function isShown(block) {
-  if (block.kind === 'image') return true
+  if (block.kind === 'image' || block.kind === 'figure') return true
   if (block.kind === 'code') return block.text.trim() !== ''
   return block.runs.length > 0
+}
+
+// ---------------------------------------------------------------- figures
+
+/** Drawing boxes with finite, ordered edges; at most MAX_DRAWINGS. */
+function saneBoxes(drawings) {
+  const out = []
+  for (const d of Array.isArray(drawings) ? drawings : []) {
+    if (out.length >= MAX_DRAWINGS) break
+    if (!d || typeof d !== 'object') continue
+    const { left, bottom, right, top } = d
+    if (![left, bottom, right, top].every(Number.isFinite) || right < left || top < bottom) continue
+    out.push({ left, bottom, right, top })
+  }
+  return out
+}
+
+/**
+ * Where a figure drawn with paths sits above `caption`: from below the nearest
+ * printed line above (or the page's top edge) down to the caption, cut to the
+ * drawings in that band with FIGURE_PAD around them; null when the band is
+ * under FIGURE_MIN_LINES body lines tall or has no drawing in it.
+ */
+function figureRegion(caption, printed, boxes, body, pageTop) {
+  const above = printed.filter(l => l.y > caption.y + 0.5 * caption.size).reduce((low, l) => (!low || l.y < low.y ? l : low), null)
+  const ceiling = above ? above.y - DESCENT * above.size : Number.isFinite(pageTop) ? pageTop : Infinity
+  const floor = caption.y + caption.size
+  if (ceiling - floor < FIGURE_MIN_LINES * 1.2 * body) return null
+  const inside = withoutLoneRules(
+    boxes.filter(b => b.top >= floor && b.bottom <= ceiling),
+    1.2 * body,
+  )
+  if (inside.length === 0) return null
+  const top = Math.min(ceiling, maxOf(inside, b => b.top) + FIGURE_PAD)
+  const bottom = Math.max(floor, -maxOf(inside, b => -b.bottom) - FIGURE_PAD)
+  if (top - bottom < FIGURE_MIN_LINES * 1.2 * body) return null
+  return { left: -maxOf(inside, b => -b.left) - FIGURE_PAD, bottom, right: maxOf(inside, b => b.right) + FIGURE_PAD, top }
+}
+
+/**
+ * The boxes without a rule (a hairline, at most RULE_HEIGHT tall) that is the
+ * topmost or the lowest and stands more than `gap` apart from the rest: the rule
+ * under a running head or above footnotes, not an edge of the figure.
+ */
+function withoutLoneRules(boxes, gap) {
+  const isRule = b => b.top - b.bottom <= RULE_HEIGHT
+  // Sorted by top, the next box reaches highest of the rest; sorted by bottom, lowest.
+  const byTop = [...boxes].sort((a, b) => b.top - a.top)
+  let first = 0
+  while (first < byTop.length - 1 && isRule(byTop[first]) && byTop[first].bottom - byTop[first + 1].top > gap) first++
+  const byBottom = byTop.slice(first).sort((a, b) => a.bottom - b.bottom)
+  let low = 0
+  while (low < byBottom.length - 1 && isRule(byBottom[low]) && byBottom[low + 1].bottom - byBottom[low].top > gap) low++
+  return byBottom.slice(low)
 }
 
 function continues(open, line, frame) {
@@ -550,7 +629,8 @@ function cut(blocks, maxChars) {
   let left = maxChars
   const out = []
   for (const block of blocks) {
-    const length = block.kind === 'code' ? block.text.length : block.kind === 'image' ? 0 : block.runs.reduce((n, r) => n + r.text.length, 0)
+    const picture = block.kind === 'image' || block.kind === 'figure'
+    const length = block.kind === 'code' ? block.text.length : picture ? 0 : block.runs.reduce((n, r) => n + r.text.length, 0)
     if (length <= left) {
       out.push(block)
       left -= length
@@ -559,7 +639,7 @@ function cut(blocks, maxChars) {
     if (left <= 0) {
       // nothing of this block fits: no empty block, just the notice
     } else if (block.kind === 'code') out.push({ kind: 'code', text: block.text.slice(0, left) })
-    else if (block.kind !== 'image') {
+    else if (!picture) {
       const runs = []
       for (const run of block.runs) {
         if (left <= 0) break

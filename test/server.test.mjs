@@ -12,7 +12,8 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildPdf, buildScannedPdf, TEXT } from './pdf-fixture.mjs'
+import { buildDrawingPdf, buildPdf, buildScannedPdf, TEXT } from './pdf-fixture.mjs'
+import { loadCanvas } from '../server/pdf-source.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER = path.join(ROOT, 'server', 'server.mjs')
@@ -513,6 +514,17 @@ describe('text mode', () => {
     assert.equal(res.json.blocks[0].kind, 'image')
     assert.ok(res.json.blocks[0].file.startsWith(path.join(dataDir, 'pages')))
     assert.equal(res.json.blocks[0].alt, 'Image 32×32')
+  })
+
+  test('a figure drawn with paths is a picture with the canvas, a drawing line without it; never a bare mark', async () => {
+    const id = await addRealPdf('drawing.pdf', buildDrawingPdf())
+    const res = await request('GET', `/api/books/${id}/page/1`)
+    const kinds = res.json.blocks.map(b => b.kind)
+    const canvas = await loadCanvas()
+    assert.deepEqual(kinds, ['para', canvas ? 'image' : 'drawing', 'caption', 'para'])
+    assert.equal(res.json.blocks[1].alt, 'Figure 1. A box.')
+    if (canvas) assert.ok(res.json.blocks[1].file.startsWith(path.join(dataDir, 'pages')))
+    else assert.deepEqual(Object.keys(res.json.blocks[1]).sort(), ['alt', 'kind'])
   })
 
   test('a cached page whose picture file was swept is extracted again', async () => {

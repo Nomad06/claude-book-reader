@@ -30,7 +30,7 @@ import {
 import { nodeVersionProblem } from './node-version.mjs'
 import { clampLevels, errorLine, plainText } from './text.mjs'
 import { shared } from './shared.mjs'
-import { createPdfSource, sweepImages } from './pdf-source.mjs'
+import { createPdfSource, sweepImages, withFigures } from './pdf-source.mjs'
 import { calibrate, isScanned, pageBlocks } from './page-blocks.mjs'
 
 // Before anything else: pdf.js (text mode) needs a recent node. The mod shows
@@ -579,8 +579,9 @@ async function pageOf(book, n) {
   return shared(extracting, key, async () => {
     let answer
     try {
-      const { items, images, width, height, top, bottom } = await doc.pageContent(n)
-      const blocks = pageBlocks(items, images, book.textProfile, { top, bottom, pageNumber: n })
+      const { items, images, drawings, width, height, top, bottom } = await doc.pageContent(n)
+      // Figures drawn with paths are rendered into pictures where the canvas is installed, else shown as a line.
+      const blocks = await withFigures(doc, n, pageBlocks(items, images, book.textProfile, { top, bottom, pageNumber: n, drawings }))
       answer = { page: n, pages: doc.pages, blocks, scanned: isScanned(items, images, width, height) }
     } catch (error) {
       answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: errorLine(error) }

@@ -773,3 +773,112 @@ describe('scanned', () => {
     assert.equal(isScanned([item('Body text.', { y: 700 })], [picture(612, 792)], 612, 792), false)
   })
 })
+
+// Part C: a figure caption with no picture above it, on a stretch of the page drawn with paths, marks a figure
+// the server renders. Drawings are path (and painted picture) boxes in page coordinates, as pdf-source gives them.
+describe('figures drawn with paths', () => {
+  const box = (left, bottom, right, top) => ({ left, bottom, right, top })
+  // Two body lines, a gap with the drawing, the caption, a line below; the page's running-head rule far above.
+  const page = () => [
+    ...lines(['First paragraph line one runs long.', 'and ends here.'], { top: 700 }),
+    ...lines(['Figure 1. A box.', 'Text below the figure.'], { top: 540 }),
+  ]
+  const RULE = box(72, 760, 400, 760)
+
+  test('marks a figure between the last line above and the caption, cut to the drawing', () => {
+    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings: [RULE, box(100, 560, 400, 660)] })
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['para', 'figure', 'caption', 'para'],
+    )
+    assert.equal(blocks[1].alt, 'Figure 1. A box.')
+    assert.deepEqual(blocks[1].region, { left: 97, bottom: 557, right: 403, top: 663 })
+  })
+
+  test('the region never reaches the line above or the caption', () => {
+    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings: [box(60, 400, 420, 760)] })
+    const { region } = blocks.find(b => b.kind === 'figure')
+    assert.ok(region.top <= 687 - 3, `top ${region.top}`)
+    assert.ok(region.bottom >= 540 + 10, `bottom ${region.bottom}`)
+    assert.deepEqual([region.left, region.right], [57, 423])
+  })
+
+  test('a raster picture right above the caption is the figure: nothing is marked', () => {
+    const images = [{ file: '/p/1.rgb', width: 600, height: 300, x: 100, y: 660, w: 300, h: 100 }]
+    const blocks = pageBlocks(page(), images, PROFILE, { top: 792, bottom: 0, drawings: [box(100, 560, 400, 660)] })
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['para', 'image', 'caption', 'para'],
+    )
+  })
+
+  test('no drawing between the line above and the caption: nothing is marked', () => {
+    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings: [RULE, box(72, 300, 400, 300)] })
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['para', 'caption', 'para'],
+    )
+  })
+
+  test('a table caption marks nothing: a table is text', () => {
+    const items = [...lines(['First paragraph line one runs long.', 'and ends here.'], { top: 700 }), ...lines(['Table 1. Numbers.', 'Row one.'], { top: 540 })]
+    const blocks = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings: [box(100, 560, 400, 660)] })
+    assert.ok(!blocks.some(b => b.kind === 'figure'))
+  })
+
+  test('a gap of about a line marks nothing, even with a rule in it', () => {
+    const items = [...lines(['Body line above.'], { top: 700 }), ...lines(['Figure 2. Close.'], { top: 680 })]
+    const blocks = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings: [box(72, 692, 400, 692)] })
+    assert.ok(!blocks.some(b => b.kind === 'figure'))
+  })
+
+  test('a running head dropped from the text still bounds the region', () => {
+    const items = [item('Chapter One · Running Head', { y: 740 }), ...lines(['Рис. 1.1. Пример', 'Text below.'], { top: 580 })]
+    const profile = { ...PROFILE, headers: [{ y: 740, text: 'Chapter One · Running Head' }] }
+    const blocks = pageBlocks(items, [], profile, { top: 792, bottom: 0, drawings: [box(100, 600, 400, 760)] })
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['figure', 'caption', 'para'],
+    )
+    assert.ok(blocks[0].region.top <= 740 - 3)
+  })
+
+  test('a rule standing apart above or below the drawing (under a running head) is not part of the figure', () => {
+    // The test book: running head at 614, its rule at 608, the figure from 590 down.
+    const items = [item('Восход AI-инженерии 83', { x: 300, y: 614, size: 12 }), ...lines(['Рис. 2.1. Пример', 'Text below.'], { top: 380 })]
+    const drawings = [box(56, 608, 410, 608), box(100, 420, 400, 590), box(56, 395, 410, 395.5)]
+    const blocks = pageBlocks(items, [], PROFILE, { top: 660, bottom: 0, drawings })
+    const { region } = blocks.find(b => b.kind === 'figure')
+    assert.deepEqual(region, { left: 97, bottom: 417, right: 403, top: 593 })
+    // A rule close to the drawing is its own edge, and stays.
+    const framed = pageBlocks(items, [], PROFILE, { top: 660, bottom: 0, drawings: [box(56, 596, 410, 596), box(100, 420, 400, 590)] })
+    assert.equal(framed.find(b => b.kind === 'figure').region.top, 599)
+  })
+
+  test('a caption set sideways (a landscape figure) marks nothing: its position says nothing of the figure', () => {
+    const items = [...lines(['First paragraph line one runs long.', 'and ends here.'], { top: 700 }), ...lines(['Figure 1. A box.'], { top: 540 }).map(it => ({ ...it, upright: false }))]
+    const blocks = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings: [box(100, 560, 400, 660)] })
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['para', 'caption'],
+    )
+  })
+
+  test('a caption first on the page: the region goes up to the drawing', () => {
+    const items = lines(['Figure 3. Top.', 'Text below.'], { top: 580 })
+    const blocks = pageBlocks(items, [], PROFILE, { top: 792, bottom: 0, drawings: [box(100, 600, 400, 700)] })
+    assert.deepEqual(blocks[0], { kind: 'figure', alt: 'Figure 3. Top.', region: { left: 97, bottom: 597, right: 403, top: 703 } })
+  })
+
+  test('hostile drawings (not finite, inverted) are ignored', () => {
+    const drawings = [box(NaN, 560, 400, 660), box(100, 660, 400, 560), null, 'x']
+    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings })
+    assert.ok(!blocks.some(b => b.kind === 'figure'))
+  })
+
+  test('a cut page keeps its figure marks and does not count them as text', () => {
+    const blocks = pageBlocks(page(), [], PROFILE, { top: 792, bottom: 0, drawings: [box(100, 560, 400, 660)], maxChars: 60 })
+    assert.equal(blocks[1].kind, 'figure')
+    assert.match(text(blocks.at(-1)), /page cut at 60/)
+  })
+})

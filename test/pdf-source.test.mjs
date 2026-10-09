@@ -9,10 +9,24 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { MAX_IMAGE_HEIGHT, MAX_PAGE_IMAGES, MAX_IMAGE_WIDTH, PAGE_IMAGE_WAIT_MS, createPdfSource, downscale, imagesOf, sweepImages, toRgb } from '../server/pdf-source.mjs'
+import {
+  MAX_IMAGE_HEIGHT,
+  MAX_PAGE_FIGURES,
+  MAX_PAGE_IMAGES,
+  MAX_IMAGE_WIDTH,
+  PAGE_IMAGE_WAIT_MS,
+  createPdfSource,
+  downscale,
+  imagesOf,
+  loadCanvas,
+  sweepImages,
+  toRgb,
+  withFigures,
+} from '../server/pdf-source.mjs'
+import { pageBlocks } from '../server/page-blocks.mjs'
 import { cleanRun, errorLine, plainText } from '../server/text.mjs'
 import { shared } from '../server/shared.mjs'
-import { TEXT, buildPdf, buildScannedPdf } from './pdf-fixture.mjs'
+import { TEXT, buildDrawingPdf, buildPdf, buildScannedPdf } from './pdf-fixture.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const VENDOR = path.join(ROOT, 'viewer', 'vendor', 'pdfjs')
@@ -290,5 +304,99 @@ describe('bounds', () => {
     const line = errorLine(new Error('bad \u001b[2J\nbytes ' + 'x'.repeat(1000)))
     assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(line))
     assert.equal(line.length, 300)
+  })
+})
+
+// Part C: figures drawn with paths. Rendering needs the optional @napi-rs/canvas; without node_modules
+// (an installed plugin) the tests that render are skipped and the figure becomes a drawing line.
+describe('figures drawn with paths', () => {
+  const PROFILE = { bodySize: 10, headers: [] }
+  const NO_CANVAS = '@napi-rs/canvas is not installed (npm install adds it)'
+  const near = (box, want) => ['left', 'bottom', 'right', 'top'].every(k => Math.abs(box[k] - want[k]) <= 1.5)
+  const FIGURE = { kind: 'figure', alt: 'Figure 9. X.', region: { left: 0, bottom: 0, right: 100, top: 100 } }
+
+  async function figureBlocks(src, name, options) {
+    const doc = await src.open(await write(name, buildDrawingPdf(options)))
+    const content = await doc.pageContent(1)
+    const blocks = pageBlocks(content.items, content.images, PROFILE, { top: content.top, bottom: content.bottom, drawings: content.drawings })
+    return { doc, content, blocks }
+  }
+
+  test('pageContent gives the boxes of painted paths in page coordinates, not of clipping paths', async () => {
+    const { content, blocks } = await figureBlocks(source, 'boxes.pdf')
+    assert.ok(content.drawings.some(b => near(b, { left: 150, bottom: 500, right: 350, top: 620 })), JSON.stringify(content.drawings))
+    assert.ok(content.drawings.some(b => near(b, { left: 120, bottom: 480, right: 380, top: 640 })))
+    assert.ok(!content.drawings.some(b => b.right - b.left >= 600), 'the clip rectangle is not a drawing')
+    assert.ok(content.items.every(it => it.upright === true), 'text set straight is upright')
+    assert.deepEqual(
+      blocks.map(b => b.kind),
+      ['para', 'figure', 'caption', 'para'],
+    )
+  })
+
+  test('with canvas, the figure is rendered into a picture with the caption as alt', async t => {
+    if (!(await loadCanvas())) return t.skip(NO_CANVAS)
+    const { doc, blocks } = await figureBlocks(source, 'figure.pdf')
+    const out = await withFigures(doc, 1, blocks)
+    assert.deepEqual(
+      out.map(b => b.kind),
+      ['para', 'image', 'caption', 'para'],
+    )
+    const img = out[1]
+    assert.equal(img.alt, 'Figure 1. A box.')
+    assert.ok(img.width <= MAX_IMAGE_WIDTH && img.height <= MAX_IMAGE_HEIGHT && img.width >= 24 && img.height >= 24, `${img.width}×${img.height}`)
+    assert.ok(img.file.startsWith(path.join(dir, 'pages')))
+    const rgb = await fs.readFile(img.file)
+    assert.equal(rgb.length, img.width * img.height * 3)
+    assert.ok(rgb.some(v => v < 100), 'the frame and the box are drawn')
+    assert.ok(rgb.some(v => v === 255), 'the paper is white')
+  })
+
+  test('without canvas, the figure is a drawing line named by its caption', async () => {
+    const plain = createPdfSource({ vendorDir: VENDOR, imagesDir: path.join(dir, 'pages'), loadCanvas: async () => null })
+    try {
+      const { doc, blocks } = await figureBlocks(plain, 'nocanvas.pdf')
+      const out = await withFigures(doc, 1, blocks)
+      assert.deepEqual(out[1], { kind: 'drawing', alt: 'Figure 1. A box.' })
+      assert.ok(!out.some(b => b.kind === 'figure'))
+    } finally {
+      await plain.closeAll()
+    }
+  })
+
+  test('a render that throws, gives nothing or runs past the page budget leaves drawing lines', async () => {
+    const throwing = { renderFigure: async () => Promise.reject(new Error('boom')) }
+    assert.deepEqual(await withFigures(throwing, 1, [FIGURE]), [{ kind: 'drawing', alt: 'Figure 9. X.' }])
+    const empty = { renderFigure: async () => null }
+    assert.deepEqual(await withFigures(empty, 1, [FIGURE]), [{ kind: 'drawing', alt: 'Figure 9. X.' }])
+    let calls = 0
+    const slow = { renderFigure: async () => (calls++, await new Promise(r => setTimeout(r, 30)), { file: '/f.rgb', width: 40, height: 40 }) }
+    const out = await withFigures(slow, 1, [FIGURE, FIGURE, FIGURE], { budgetMs: 20 })
+    assert.equal(calls, 1)
+    assert.deepEqual(
+      out.map(b => b.kind),
+      ['image', 'drawing', 'drawing'],
+    )
+  })
+
+  test(`at most MAX_PAGE_FIGURES (${MAX_PAGE_FIGURES}) figures of a page are rendered`, async () => {
+    let calls = 0
+    const doc = { renderFigure: async (n, region, { index }) => (calls++, { file: `/f-${index}.rgb`, width: 40, height: 40 }) }
+    const out = await withFigures(doc, 1, Array.from({ length: MAX_PAGE_FIGURES + 2 }, () => FIGURE))
+    assert.equal(calls, MAX_PAGE_FIGURES)
+    assert.deepEqual(out.at(-1), { kind: 'drawing', alt: 'Figure 9. X.' })
+    assert.equal(new Set(out.filter(b => b.kind === 'image').map(b => b.file)).size, MAX_PAGE_FIGURES)
+  })
+
+  test('a render past its time is cancelled and gives nothing; in time, it gives the picture', async t => {
+    if (!(await loadCanvas())) return t.skip(NO_CANVAS)
+    // Thousands of wide curves: more than one ~15 ms slice of pdf.js drawing.
+    const { doc, blocks } = await figureBlocks(source, 'slow.pdf', { strokes: 3000 })
+    const started = Date.now()
+    assert.equal(await doc.renderFigure(1, blocks[1].region, { timeoutMs: 1, index: 0 }), null)
+    const spent = Date.now() - started
+    const whole = Date.now()
+    assert.ok(await doc.renderFigure(1, blocks[1].region, { timeoutMs: 30_000, index: 1 }))
+    assert.ok(spent < Date.now() - whole, `cut short: ${spent} ms, whole render ${Date.now() - whole} ms`)
   })
 })

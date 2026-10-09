@@ -1,10 +1,14 @@
 // pdf.js in Node (the vendored legacy build): opens books, reads their outline
-// and, page by page, the text items with font flags and the pictures. Pictures
-// are written as raw RGB files for the terminal to read itself.
+// and, page by page, the text items with font flags, the pictures and the boxes
+// of what is drawn with paths. Pictures are written as raw RGB files for the
+// terminal to read itself; figures drawn with paths are rendered the same way
+// when the optional @napi-rs/canvas is installed.
 
 import fsp from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { errorLine } from './text.mjs'
 
 export const MAX_IMAGE_WIDTH = 800
 export const MAX_IMAGE_HEIGHT = 4096 // the terminal engine's Image limit
@@ -15,14 +19,26 @@ const MIN_IMAGE_SIDE = 24
 export const PAGE_IMAGE_WAIT_MS = 10_000
 const MAX_OUTLINE = 2000
 
+// Figures drawn with paths, rendered when @napi-rs/canvas is there. Rendering is
+// CPU work: a page renders a few, each within its own time and the page's budget,
+// at most MAX_FIGURE_PIXELS each; the rest are shown as a line.
+export const MAX_PAGE_FIGURES = 4
+export const FIGURE_RENDER_MS = 5_000
+export const FIGURE_PAGE_MS = 10_000
+const MAX_FIGURE_PIXELS = 1_500_000
+const MAX_FIGURE_SCALE = 3 // pixels per point: sharp enough for any terminal cell
+const MAX_DRAWINGS = 5000 // path boxes reported for one page
+
 // pdf.js warns once at import that it cannot render (no canvas, no DOMMatrix,
-// no Path2D). Text extraction never renders, so exactly those are dropped.
+// no Path2D). Without the canvas nothing is rendered (figures become a line),
+// so exactly those are dropped then; with it they mean rendering is broken and
+// are shown.
 const RENDER_WARNING = /^Warning: Cannot (load "@napi-rs\/canvas"|polyfill `(DOMMatrix|Path2D)`)/
 
-async function importQuietly(href) {
+async function importQuietly(href, quiet) {
   const warn = console.warn
   console.warn = (...args) => {
-    if (typeof args[0] === 'string' && RENDER_WARNING.test(args[0])) return
+    if (quiet && typeof args[0] === 'string' && RENDER_WARNING.test(args[0])) return
     warn.apply(console, args)
   }
   try {
@@ -32,17 +48,42 @@ async function importQuietly(href) {
   }
 }
 
-export function createPdfSource({ vendorDir, imagesDir, maxDocs = 2 }) {
+let canvasModule = null
+/**
+ * @napi-rs/canvas, an optional dependency, or null: an installed plugin has no
+ * node_modules. Looked up once per process, from this file as pdf.js does from
+ * its own; a package that is there but will not load (a binary for another
+ * machine) is reported once.
+ */
+export function loadCanvas() {
+  canvasModule ??= (async () => {
+    try {
+      return createRequire(import.meta.url)('@napi-rs/canvas')
+    } catch (error) {
+      if (error?.code !== 'MODULE_NOT_FOUND') console.warn(`@napi-rs/canvas did not load, figures are shown as a line: ${errorLine(error)}`)
+      return null
+    }
+  })()
+  return canvasModule
+}
+
+export function createPdfSource({ vendorDir, imagesDir, maxDocs = 2, loadCanvas: canvasLoader = loadCanvas }) {
   const url = p => pathToFileURL(path.join(vendorDir, p)).href
   let lib = null
+  let canvasLib
   // Loaded on first use, never at import: the server checks the Node version first.
   async function pdfjs() {
     if (lib) return lib
-    const loaded = await importQuietly(url('build/pdf.min.mjs'))
+    canvasLib ??= await Promise.resolve()
+      .then(canvasLoader)
+      .catch(() => null)
+    const loaded = await importQuietly(url('build/pdf.min.mjs'), !canvasLib)
     loaded.GlobalWorkerOptions.workerSrc = url('build/pdf.worker.min.mjs')
     lib = loaded
     return lib
   }
+  // pdf.js renders with the canvas it polyfilled DOMMatrix and Path2D from at import.
+  const renderer = () => (canvasLib && typeof globalThis.Path2D === 'function' && typeof globalThis.DOMMatrix === 'function' ? canvasLib : null)
   const docs = new Map() // id -> Promise<Doc>, insertion order = age
 
   async function load(book) {
@@ -57,7 +98,7 @@ export function createPdfSource({ vendorDir, imagesDir, maxDocs = 2 }) {
       isEvalSupported: false,
       verbosity: 0,
     })
-    return makeDoc(pdf, await task.promise, task, book.id, imagesDir)
+    return makeDoc(pdf, await task.promise, task, book.id, imagesDir, renderer)
   }
 
   async function open(book) {
@@ -98,6 +139,7 @@ function itemsOf(textContent, fontOf) {
     if (!('str' in it) || it.str === '') continue
     const style = textContent.styles[it.fontName] ?? {}
     const font = fontOf(it.fontName)
+    const [a, b, c, d] = it.transform
     items.push({
       text: it.str,
       x: it.transform[4],
@@ -108,12 +150,14 @@ function itemsOf(textContent, fontOf) {
       font: font?.name ?? '',
       mono: style.fontFamily === 'monospace' || font?.isMonospace === true,
       eol: it.hasEOL === true,
+      // Set straight, not turned (a landscape figure's labels): only then does its position place a figure.
+      upright: a > 0 && d > 0 && Math.abs(b) + Math.abs(c) <= 0.01 * Math.max(a, d),
     })
   }
   return items
 }
 
-function makeDoc(pdf, doc, task, id, imagesDir) {
+function makeDoc(pdf, doc, task, id, imagesDir, renderer) {
   const pages = doc.numPages
 
   async function outline() {
@@ -156,9 +200,83 @@ function makeDoc(pdf, doc, task, id, imagesDir) {
       const items = itemsOf(tc, fontOf)
       const images = await imagesOf(pdf, page, ops, `${id}-${n}`, imagesDir)
       const [x0, y0, x1, y1] = page.view
+      // What is drawn on the page, cut to the page box: page-blocks finds figures drawn with paths by it.
+      const drawings = []
+      for (const box of paintsOf(pdf.OPS, ops).drawings) {
+        const cut = { left: Math.max(x0, box.left), bottom: Math.max(y0, box.bottom), right: Math.min(x1, box.right), top: Math.min(y1, box.top) }
+        if (cut.left <= cut.right && cut.bottom <= cut.top) drawings.push(cut)
+      }
       // top and bottom are the page box's edges in the items' coordinates: running heads are found by them.
-      return { items, images, width: x1 - x0, height: y1 - y0, top: y1, bottom: y0 }
+      return { items, images, drawings, width: x1 - x0, height: y1 - y0, top: y1, bottom: y0 }
     } finally {
+      page.cleanup()
+    }
+  }
+
+  /**
+   * Renders `region` of page `n` (page coordinates, as page-blocks marks it) to a
+   * raw RGB file within the picture limits; null without a canvas, for a region
+   * too small to show, or when the render takes longer than `timeoutMs` (it is
+   * cancelled then).
+   */
+  async function renderFigure(n, region, { timeoutMs = FIGURE_RENDER_MS, index = 0 } = {}) {
+    const canvasLib = renderer()
+    if (!canvasLib) return null
+    const page = await doc.getPage(n)
+    let render = null
+    try {
+      const [x0, y0, x1, y1] = page.view
+      const left = Math.max(x0, region.left)
+      const right = Math.min(x1, region.right)
+      const bottom = Math.max(y0, region.bottom)
+      const top = Math.min(y1, region.top)
+      if (!(right - left > 0 && top - bottom > 0)) return null
+      // On a page turned a quarter, the region's width is drawn upright.
+      const [w, h] = page.rotate % 180 === 0 ? [right - left, top - bottom] : [top - bottom, right - left]
+      const scale = Math.min(MAX_FIGURE_SCALE, MAX_IMAGE_WIDTH / w, MAX_IMAGE_HEIGHT / h, Math.sqrt(MAX_FIGURE_PIXELS / (w * h)))
+      const viewport = page.getViewport({ scale })
+      // The region's corners on the rendered page (a rotated page turns them): the canvas shows just that.
+      const [ax, ay] = viewport.convertToViewportPoint(left, top)
+      const [bx, by] = viewport.convertToViewportPoint(right, bottom)
+      const width = Math.min(MAX_IMAGE_WIDTH, Math.floor(Math.abs(bx - ax)))
+      const height = Math.min(MAX_IMAGE_HEIGHT, Math.floor(Math.abs(by - ay)))
+      if (width < MIN_IMAGE_SIDE || height < MIN_IMAGE_SIDE) return null
+      const canvas = canvasLib.createCanvas(width, height)
+      const context = canvas.getContext('2d')
+      const deadline = Date.now() + timeoutMs
+      let late = false
+      const task = page.render({ canvasContext: context, viewport, transform: [1, 0, 0, 1, -Math.min(ax, bx), -Math.min(ay, by)], background: 'rgb(255,255,255)' })
+      render = task
+      // pdf.js draws in slices of about 15 ms; between them the server serves others, and past the deadline it stops.
+      task.onContinue = next => {
+        if (Date.now() < deadline) return void setImmediate(next)
+        late = true
+        task.cancel()
+      }
+      // While pdf.js waits (on its operator list, fonts or pictures) no slice runs: a timer stops that too.
+      let timer
+      const waited = new Promise(resolve => (timer = setTimeout(() => ((late = true), resolve()), timeoutMs)))
+      try {
+        await Promise.race([task.promise, waited])
+      } catch (error) {
+        if (!late) throw error
+      } finally {
+        clearTimeout(timer)
+      }
+      if (late) return null
+      render = null
+      const rgb = toRgb({ width, height, kind: 3, data: context.getImageData(0, 0, width, height).data })
+      await fsp.mkdir(imagesDir, { recursive: true, mode: 0o700 })
+      const file = path.join(imagesDir, `${id}-${n}-fig${index}.rgb`)
+      await fsp.writeFile(file, rgb, { mode: 0o600 })
+      await sweepImages(imagesDir, MAX_IMAGE_FILES)
+      return { file, width, height }
+    } finally {
+      // A render still running (past its time) is stopped and settled before the page lets go of its resources.
+      if (render) {
+        render.cancel()
+        await render.promise.catch(() => {})
+      }
       page.cleanup()
     }
   }
@@ -179,7 +297,37 @@ function makeDoc(pdf, doc, task, id, imagesDir) {
     return out
   }
 
-  return { id, pages, outline, pageContent, samples, destroy: () => task.destroy() }
+  return { id, pages, outline, pageContent, renderFigure, samples, destroy: () => task.destroy() }
+}
+
+/**
+ * Page blocks with each `figure` mark of page-blocks made a picture (an image
+ * block, alt the caption) or, without a canvas, past MAX_PAGE_FIGURES or the
+ * page's time budget, or when the render fails, a `drawing` line. No `figure`
+ * is left; a failure never fails the page.
+ */
+export async function withFigures(doc, n, blocks, { budgetMs = FIGURE_PAGE_MS, renderMs = FIGURE_RENDER_MS } = {}) {
+  const deadline = Date.now() + budgetMs
+  let rendered = 0
+  const out = []
+  for (const block of blocks) {
+    if (block.kind !== 'figure') {
+      out.push(block)
+      continue
+    }
+    let picture = null
+    const left = deadline - Date.now()
+    if (rendered < MAX_PAGE_FIGURES && left > 0) {
+      try {
+        picture = await doc.renderFigure(n, block.region, { timeoutMs: Math.min(renderMs, left), index: rendered })
+      } catch {
+        picture = null
+      }
+      rendered++
+    }
+    out.push(picture ? { kind: 'image', file: picture.file, width: picture.width, height: picture.height, alt: block.alt } : { kind: 'drawing', alt: block.alt })
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- images
@@ -196,17 +344,38 @@ function multiply(m, t) {
   ]
 }
 
-// Walks the page's operators with the transform stack, so each image gets its
-// box on the page; writes each picture worth showing as raw RGB. The box math
-// is for unrotated images (the common case); a rotated image lands in the
-// wrong place among the lines and is out of scope. The page waits at most
-// `waitMs` in all for pictures pdf.js is slow to deliver; once that is spent,
-// the pictures left are skipped and those already written are kept.
-export async function imagesOf(pdf, page, ops, prefix, imagesDir, { waitMs = PAGE_IMAGE_WAIT_MS } = {}) {
-  const OPS = pdf.OPS
+/** The box of [x0, y0, x1, y1] under the transform m, in page coordinates. */
+function boxUnder(m, x0, y0, x1, y1) {
+  const xs = []
+  const ys = []
+  for (const [x, y] of [
+    [x0, y0],
+    [x1, y0],
+    [x0, y1],
+    [x1, y1],
+  ]) {
+    xs.push(m[0] * x + m[2] * y + m[4])
+    ys.push(m[1] * x + m[3] * y + m[5])
+  }
+  return { left: Math.min(...xs), bottom: Math.min(...ys), right: Math.max(...xs), top: Math.max(...ys) }
+}
+
+/**
+ * Walks the page's operators with the transform stack: the pictures painted
+ * (each with its source and box, for imagesOf) and the boxes of everything
+ * drawn — paths that are stroked or filled (not those that only clip) and
+ * pictures of any size — at most MAX_DRAWINGS.
+ */
+export function paintsOf(OPS, ops) {
+  const painting = new Set([OPS.stroke, OPS.closeStroke, OPS.fill, OPS.eoFill, OPS.fillStroke, OPS.eoFillStroke, OPS.closeFillStroke, OPS.closeEOFillStroke])
+  const pictureOps = new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageMaskXObject, OPS.paintSolidColorImageMask])
   const stack = []
   let ctm = [1, 0, 0, 1, 0, 0]
-  const found = []
+  const pictures = []
+  const drawings = []
+  const draw = box => {
+    if (drawings.length < MAX_DRAWINGS && [box.left, box.bottom, box.right, box.top].every(Number.isFinite)) drawings.push(box)
+  }
   for (let i = 0; i < ops.fnArray.length; i++) {
     const fn = ops.fnArray[i]
     const args = ops.argsArray[i]
@@ -217,12 +386,30 @@ export async function imagesOf(pdf, page, ops, prefix, imagesDir, { waitMs = PAG
       stack.push(ctm)
       if (Array.isArray(args[0])) ctm = multiply(ctm, args[0])
     } else if (fn === OPS.paintFormXObjectEnd) ctm = stack.pop() ?? ctm
-    else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject) {
-      const w = Math.hypot(ctm[0], ctm[1])
-      const h = Math.hypot(ctm[2], ctm[3])
-      found.push({ source: args[0], x: ctm[4] + Math.min(0, ctm[2]), y: ctm[5] + Math.max(ctm[3], 0) + Math.max(ctm[1], 0), w, h })
+    else if (fn === OPS.constructPath) {
+      // [paint op, path data, [minX, minY, maxX, maxY]] in the current user space.
+      const mm = args?.[2]
+      if (painting.has(args?.[0]) && mm && mm.length >= 4) draw(boxUnder(ctm, mm[0], mm[1], mm[2], mm[3]))
+    } else if (pictureOps.has(fn)) {
+      draw(boxUnder(ctm, 0, 0, 1, 1))
+      if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject) {
+        const w = Math.hypot(ctm[0], ctm[1])
+        const h = Math.hypot(ctm[2], ctm[3])
+        pictures.push({ source: args[0], x: ctm[4] + Math.min(0, ctm[2]), y: ctm[5] + Math.max(ctm[3], 0) + Math.max(ctm[1], 0), w, h })
+      }
     }
   }
+  return { pictures, drawings }
+}
+
+// Writes each picture of the page worth showing as raw RGB, with its box on the
+// page (see paintsOf). The box math is for unrotated images (the common case);
+// a rotated image lands in the wrong place among the lines and is out of scope.
+// The page waits at most `waitMs` in all for pictures pdf.js is slow to deliver;
+// once that is spent, the pictures left are skipped and those already written
+// are kept.
+export async function imagesOf(pdf, page, ops, prefix, imagesDir, { waitMs = PAGE_IMAGE_WAIT_MS } = {}) {
+  const found = paintsOf(pdf.OPS, ops).pictures
   const images = []
   const deadline = Date.now() + waitMs
   for (const [k, hit] of found.entries()) {

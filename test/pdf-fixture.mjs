@@ -110,3 +110,35 @@ export function buildScannedPdf({ width = 612, height = 792, pixels = 32, copies
   objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`
   return finish(objects, catalogId)
 }
+
+/**
+ * One page with a figure drawn with paths: a line of text, a filled gray box
+ * (150..350 × 500..620) inside a stroked black frame (120..380 × 480..640), a
+ * clipping rectangle that paints nothing, then "Figure 1. A box." and a line
+ * below. Helvetica, 10 pt. `strokes` adds that many wide curves across the box:
+ * a figure slow to render.
+ */
+export function buildDrawingPdf({ width = 612, height = 792, strokes = 0 } = {}) {
+  const objects = []
+  const add = body => (objects.push(body), objects.length)
+  const catalogId = add('')
+  const pagesId = add('')
+  const fontId = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>')
+  const text = (y, s) => `BT /F1 10 Tf 1 0 0 1 72 ${y} Tm (${esc(s)}) Tj ET`
+  const stream = [
+    text(700, 'Some text above the figure.'),
+    `q 0 0 ${width} ${height} re W n Q`,
+    'q 0.3 g 150 500 200 120 re f Q',
+    'q 0 G 2 w 120 480 260 160 re S Q',
+    ...Array.from({ length: strokes }, (_, i) => `q 0.5 G 9 w 1 J 130 ${490 + (i % 140)} m 200 640 300 480 370 ${630 - (i % 140)} c S Q`),
+    text(450, 'Figure 1. A box.'),
+    text(430, 'Text below the figure.'),
+  ].join('\n')
+  const contentId = add(`<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`)
+  const pageId = add(
+    `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+  )
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`
+  objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`
+  return finish(objects, catalogId)
+}
