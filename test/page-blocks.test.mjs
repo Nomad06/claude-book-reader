@@ -329,6 +329,264 @@ describe('blocks', () => {
   })
 })
 
+// The real book these are modelled on (AI-инженерия, 467×660 pt pages): body 10 pt on a 12.1 pt pitch,
+// running heads 12 pt at y 608–614 with the folio first (even pages) or last (odd pages), contents 9.5 pt.
+const BOOK = { top: 660.5, bottom: 0 }
+
+/** One line from several items laid side by side, like pdf.js gives a contents line. */
+function row(parts, { x = 56.7, y, size = 9.5, ...rest } = {}) {
+  const out = []
+  let at = x
+  for (const part of parts) {
+    const it = item(part, { x: at, y, size, ...rest })
+    out.push(it)
+    at += it.width
+  }
+  return out
+}
+
+const body = (texts, top = 579) => lines(texts, { top, x: 56.7, leading: 1.21 })
+
+describe('running heads by position', () => {
+  test('a running head with the folio first or last is dropped on its page, whatever its size', () => {
+    const even = [item('36 Глава 1. Основы создания AI-приложений с использованием базовых моделей', { x: 56.7, y: 613.9, size: 12 }), ...body(['AI-приложений и сокращают время их выхода на рынок.'])]
+    const odd = [item('Восход AI-инженерии 27', { x: 307.8, y: 613.9, size: 12 }), ...body(['основанная на английском языке, будет чаще предсказывать'])]
+    const contents = [...row(['10', ' ', 'Оглавление'], { y: 608.2, size: 12 }), ...body(['Текст страницы.'])]
+    for (const [items, n] of [[even, 36], [odd, 27], [contents, 10]]) {
+      assert.deepEqual(pageBlocks(items, [], PROFILE, { ...BOOK, pageNumber: n }).map(b => b.kind), ['para'], `page ${n}`)
+      // The folio need not be the PDF's page number (front matter counts apart): still a running head.
+      assert.deepEqual(pageBlocks(items, [], PROFILE, BOOK).map(b => b.kind), ['para'], `page ${n} without its number`)
+    }
+    // p21: a section heading right under the running head.
+    const section = [
+      item('Благодарности 21', { x: 329.4, y: 613.9, size: 12 }),
+      item('Использование примеров кода', { x: 56.7, y: 571.8, size: 20 }),
+      ...body(['Материалы к книге можно скачать на сайте.'], 550.4),
+    ]
+    assert.deepEqual(pageBlocks(section, [], PROFILE, { ...BOOK, pageNumber: 21 }).map(b => [b.kind, text(b)]), [
+      ['heading', 'Использование примеров кода'],
+      ['para', 'Материалы к книге можно скачать на сайте.'],
+    ])
+  })
+
+  test('a chapter-opening title survives: below the band, or too large for a running head', () => {
+    const opening = [
+      item('ГЛАВА 9', { x: 56.9, y: 573.3, size: 18 }),
+      item('Оптимизация вывода', { x: 56.7, y: 535.9, size: 26 }),
+      ...body(['Новые модели приходят и уходят, но сохраняет актуальность одна цель.'], 463.4),
+    ]
+    const high = [item('ГЛАВА 3', { x: 56.7, y: 625, size: 18 }), ...body(['Текст главы.'], 560)]
+    assert.deepEqual(
+      pageBlocks(opening, [], PROFILE, { ...BOOK, pageNumber: 460 }).map(b => [b.kind, b.level, text(b)]),
+      [
+        ['heading', 2, 'ГЛАВА 9'],
+        ['heading', 1, 'Оптимизация вывода'],
+        ['para', undefined, 'Новые модели приходят и уходят, но сохраняет актуальность одна цель.'],
+      ],
+    )
+    assert.deepEqual(pageBlocks(high, [], PROFILE, { ...BOOK, pageNumber: 3 }).map(b => [b.kind, text(b)]), [
+      ['heading', 'ГЛАВА 3'],
+      ['para', 'Текст главы.'],
+    ])
+  })
+
+  test('the first body line is kept even near the top edge, number or not', () => {
+    // A tight top margin: the text starts inside the band, on the normal pitch, with a number at its end.
+    const items = lines(['в отчете за 2024', 'год приводятся такие данные.'], { top: 640, x: 56.7, leading: 1.21 })
+    assert.equal(text(pageBlocks(items, [], PROFILE, { ...BOOK, pageNumber: 2024 })[0]), 'в отчете за 2024 год приводятся такие данные.')
+  })
+
+  test('a folio at the foot is dropped; a footnote at the foot is kept whole', () => {
+    const footer = [...body(['Последняя строка текста.'], 120), item('57', { x: 230, y: 30, size: 9 })]
+    assert.deepEqual(pageBlocks(footer, [], PROFILE, { ...BOOK, pageNumber: 57 }).map(text), ['Последняя строка текста.'])
+    assert.deepEqual(pageBlocks(footer, [], PROFILE, BOOK).map(text), ['Последняя строка текста.'])
+    // p27: a two-line footnote, the second line hanging under the text after the marker.
+    const note = [
+      ...body(['деляются разработчиками модели.'], 102.7),
+      item('1 В других языках, не в английском, один символ кодировки Unicode порой может обо-', { x: 56.7, y: 70.7, size: 9 }),
+      item('значаться несколькими токенами.', { x: 65.2, y: 56.7, size: 9 }),
+    ]
+    assert.deepEqual(pageBlocks(note, [], PROFILE, { ...BOOK, pageNumber: 27 }).map(text), [
+      'деляются разработчиками модели.',
+      '1 В других языках, не в английском, один символ кодировки Unicode порой может обозначаться несколькими токенами.',
+    ])
+  })
+
+  test('a one-line footnote at the foot is not taken for a footer', () => {
+    const items = [...body(['Текст страницы.'], 300), item('3 См. https://oreil.ly/G_HBp', { x: 56.7, y: 56.7, size: 9 })]
+    assert.deepEqual(pageBlocks(items, [], PROFILE, { ...BOOK, pageNumber: 41 }).map(text), ['Текст страницы.', '3 См. https://oreil.ly/G_HBp'])
+  })
+
+  test('hostile page boxes and numbers never throw and drop nothing by position', () => {
+    const items = [item('36 Running head', { x: 56.7, y: 613.9, size: 12 }), ...body(['Body.'])]
+    for (const box of [{ top: NaN, bottom: 0 }, { top: 0, bottom: 660 }, { top: Infinity, bottom: -Infinity }, { top: '660', bottom: null, pageNumber: {} }]) {
+      assert.equal(pageBlocks(items, [], PROFILE, box).length, 2, JSON.stringify(box))
+    }
+  })
+})
+
+describe('contents lines', () => {
+  // p10 of the book, item by item as pdf.js gives it (dots shortened).
+  const p10 = () => [
+    ...row(['10', ' ', 'Оглавление'], { y: 608.2, size: 12 }),
+    ...row(['Глава 9', '.', ' ', 'Оптимизация вывода', ' ', '.'.repeat(108), ' ', '460'], { x: 56.7, y: 579.6 }),
+    ...row(['Основы оптимизации вывода', ' ', '.'.repeat(102), ' ', '461'], { x: 70.9, y: 566.4 }),
+    ...row(['Метрики эффективности вывода', ' ', '.'.repeat(88), ' ', '467'], { x: 85, y: 553.1 }),
+    ...row(['Ускорители AI', ' ', '.'.repeat(128), ' ', '475'], { x: 85, y: 539.8 }),
+    ...row(['Шаг 1. Расширьте контекст', '.'.repeat(102), ' ', '509'], { x: 85, y: 526.5 }),
+    ...row(['Резюме', ' ', '.'.repeat(148), ' ', '1', '91'], { x: 70.9, y: 513.2 }),
+  ]
+
+  test('each entry is its own toc block: title without the leader, the page, the level from the indent', () => {
+    assert.deepEqual(pageBlocks(p10(), [], PROFILE, { ...BOOK, pageNumber: 10 }), [
+      { kind: 'toc', runs: [{ text: 'Глава 9. Оптимизация вывода' }], page: '460', level: 1 },
+      { kind: 'toc', runs: [{ text: 'Основы оптимизации вывода' }], page: '461', level: 2 },
+      { kind: 'toc', runs: [{ text: 'Метрики эффективности вывода' }], page: '467', level: 3 },
+      { kind: 'toc', runs: [{ text: 'Ускорители AI' }], page: '475', level: 3 },
+      { kind: 'toc', runs: [{ text: 'Шаг 1. Расширьте контекст' }], page: '509', level: 3 },
+      { kind: 'toc', runs: [{ text: 'Резюме' }], page: '191', level: 2 },
+    ])
+  })
+
+  test('ellipses, middle dots and spaced dots are leaders too; bold stays on the title', () => {
+    const items = [
+      ...row(['Предисловие', '……………', '13'], { y: 500, font: 'Minion-Bold' }),
+      ...row(['О чем эта книга ', '· · · · · · ·', ' 14'], { y: 487 }),
+      ...row(['Для кого эта книга', ' . . . . . . . ', 'xvii'], { y: 474 }),
+    ]
+    assert.deepEqual(
+      pageBlocks(items, [], PROFILE, BOOK).map(b => [b.kind, b.runs, b.page]),
+      [
+        ['toc', [{ text: 'Предисловие', bold: true }], '13'],
+        ['toc', [{ text: 'О чем эта книга' }], '14'],
+        ['toc', [{ text: 'Для кого эта книга' }], 'xvii'],
+      ],
+    )
+  })
+
+  test('a title that wraps before its leader is one entry', () => {
+    const items = [
+      ...row(['Три уровня стека AI', ' ', '.'.repeat(119), ' ', '65'], { x: 70.9, y: 600 }),
+      ...row(['Сравнение AI-инженерии и проектирования полного стека'], { x: 85, y: 586.8 }),
+      ...row(['для веб-приложений', ' ', '.'.repeat(36), ' ', '75'], { x: 99.2, y: 573.6 }),
+      ...row(['Резюме', ' ', '.'.repeat(148), ' ', '76'], { x: 56.7, y: 560.4 }),
+    ]
+    assert.deepEqual(
+      pageBlocks(items, [], PROFILE, BOOK).map(b => [b.kind, text(b), b.page, b.level]),
+      [
+        ['toc', 'Три уровня стека AI', '65', 2],
+        ['toc', 'Сравнение AI-инженерии и проектирования полного стека для веб-приложений', '75', 3],
+        ['toc', 'Резюме', '76', 1],
+      ],
+    )
+  })
+
+  test('contents lines never merge with prose, before or after; a list or caption shaped entry is still an entry', () => {
+    const items = [
+      ...body(['В книге десять глав.'], 640),
+      ...row(['1. Введение', ' ', '.'.repeat(60), ' ', '5'], { y: 627.9 }),
+      ...row(['Рис. 1.1. Пример токенизации', ' ', '.'.repeat(40), ' ', '27'], { y: 615.8 }),
+      ...lines(['Дальше идет обычный текст.'], { top: 603.7, x: 56.7 }),
+    ]
+    assert.deepEqual(
+      pageBlocks(items, [], PROFILE, BOOK).map(b => [b.kind, text(b)]),
+      [
+        ['para', 'В книге десять глав.'],
+        ['toc', '1. Введение'],
+        ['toc', 'Рис. 1.1. Пример токенизации'],
+        ['para', 'Дальше идет обычный текст.'],
+      ],
+    )
+  })
+
+  test('prose with an ellipsis, or dots without a page, stays prose', () => {
+    const items = lines(['Он ждал... и ждал… 12 минут.', 'Заполните поле: ..........'], { top: 600, x: 56.7 })
+    assert.deepEqual(pageBlocks(items, [], PROFILE, BOOK).map(b => b.kind), ['para'])
+  })
+
+  test('a hostile line of leader dots without a page is read in linear time', () => {
+    const dots = Array.from({ length: 10 }, () => '. '.repeat(2500))
+    for (const end of ['12x', '1 2 3 4', ' y']) {
+      const items = row(['a', ...dots, end], { y: 600 })
+      const started = Date.now()
+      const blocks = pageBlocks(items, [], PROFILE, BOOK)
+      assert.ok(Date.now() - started < 1000, `${end}: ${Date.now() - started} ms`)
+      assert.ok(blocks.every(b => b.kind === 'para'), end) // the prose, then the cut notice: it is over MAX_PAGE_CHARS
+    }
+  })
+
+  test('control characters never survive in a contents title', () => {
+    const items = row(['Гла\u001b[31mва\u0007 1', ' ', '.'.repeat(20), ' ', '25'], { y: 600 })
+    const [block] = pageBlocks(items, [], PROFILE, BOOK)
+    assert.deepEqual(block, { kind: 'toc', runs: [{ text: 'Гла[31mва 1' }], page: '25', level: 1 })
+  })
+})
+
+describe('paragraph boundaries', () => {
+  // p11: a quote, then its attribution set flush right over three lines.
+  test('a flush-right attribution is one paragraph; the quote before it stays apart', () => {
+    const items = [
+      ...body(['Это исчерпывающее, хорошо структурированное руководство по созданию', 'генеративных систем AI. Настоятельно рекомендую.'], 539.1),
+      item('Андрей Лопатенко, директор отдела поиска', { x: 213.2, y: 499.4 }),
+      item('и лаборатории AI в компании Neuron7', { x: 241.5, y: 487.4 }),
+      ...body(['Ценное руководство по созданию масштабируемых продуктов на основе AI.'], 463.2),
+    ]
+    // full-width lines: widths reach the right margin like the real ones (x + width ≈ 411)
+    items[0].width = 411 - 56.7
+    items[2].width = 411 - 213.2
+    items[3].width = 411 - 241.5
+    assert.deepEqual(pageBlocks(items, [], PROFILE, BOOK).map(text), [
+      'Это исчерпывающее, хорошо структурированное руководство по созданию генеративных систем AI. Настоятельно рекомендую.',
+      'Андрей Лопатенко, директор отдела поиска и лаборатории AI в компании Neuron7',
+      'Ценное руководство по созданию масштабируемых продуктов на основе AI.',
+    ])
+  })
+
+  // p100: list items whose bullets are drawn, not text: indented, 16 pt apart where the text runs at 12.
+  test('indented lines set wider apart than the page\'s own pitch are separate items', () => {
+    const items = [
+      ...body(['На момент написания книги LLM обучались на наборах данных, содержащих', 'триллионы токенов. Корпорация Meta постоянно увеличивала размеры наборов', 'данных, используемых для обучения моделей Llama:'], 273.5),
+      item('1,4 трлн токенов для модели Llama 1 (https://arxiv.org/abs/2302.13971);', { x: 70.9, y: 231.9 }),
+      item('2 трлн токенов для модели Llama 2 (https://arxiv.org/abs/2307.09288);', { x: 70.9, y: 215.9 }),
+      item('15 трлн токенов для модели Llama 3 (https://oreil.ly/vfSQw).', { x: 70.9, y: 199.9 }),
+      ...body(['В совокупности набор данных с открытым исходным кодом RedPajama-v2 от', 'компании Together насчитывает 30 трлн токенов.'], 180.6),
+    ]
+    assert.deepEqual(pageBlocks(items, [], PROFILE, BOOK).map(text), [
+      'На момент написания книги LLM обучались на наборах данных, содержащих триллионы токенов. Корпорация Meta постоянно увеличивала размеры наборов данных, используемых для обучения моделей Llama:',
+      '1,4 трлн токенов для модели Llama 1 (https://arxiv.org/abs/2302.13971);',
+      '2 трлн токенов для модели Llama 2 (https://arxiv.org/abs/2307.09288);',
+      '15 трлн токенов для модели Llama 3 (https://oreil.ly/vfSQw).',
+      'В совокупности набор данных с открытым исходным кодом RedPajama-v2 от компании Together насчитывает 30 трлн токенов.',
+    ])
+  })
+
+  // p13: a superscript note mark sits 3.5 pt above its line.
+  test('a superscript note mark does not lift its line off the baseline', () => {
+    const items = [
+      ...lines(['Когда в 2012 году авторы', 'и их коллеги из сверхточной нейронной сети', 'в своей знаковой статье показали,'], { top: 300, x: 70.9, leading: 1.2 }),
+      item('1', { x: 300, y: 288 + 3.5, size: 6 }),
+    ]
+    items[1].text += ' AlexNet'
+    const out = linesOf(items)
+    assert.deepEqual(out.map(l => l.y), [300, 288, 276])
+    assert.equal(pageBlocks(items, [], PROFILE, BOOK).length, 1)
+  })
+
+  test('an indented first line after a full line still starts a paragraph', () => {
+    const items = [
+      ...lines(['Первый абзац, первая строка во всю ширину.', 'и вторая строка тоже во всю ширину полосы.'], { top: 700, x: 72 }),
+      ...lines(['Второй абзац с отступом первой строки.', 'продолжение второго абзаца.'], { top: 674, x: 87 }),
+    ]
+    for (const it of items) it.width = 500 - it.x
+    items[3].x = 72
+    items[3].width = 428
+    assert.deepEqual(pageBlocks(items, [], PROFILE).map(text), [
+      'Первый абзац, первая строка во всю ширину. и вторая строка тоже во всю ширину полосы.',
+      'Второй абзац с отступом первой строки. продолжение второго абзаца.',
+    ])
+  })
+})
+
 // Review Focus 1: PDF.js gives `""` items with hasEOL between lines; only a page-sized picture makes a page scanned.
 describe('scanned', () => {
   const blank = [item('', { y: 700 }), item('', { y: 687 }), item('  ', { y: 674 })]

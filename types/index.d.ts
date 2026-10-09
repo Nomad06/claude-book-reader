@@ -66,6 +66,8 @@ export type Block =
   | { kind: 'para'; runs: Run[] }
   | { kind: 'list'; runs: Run[] }
   | { kind: 'caption'; runs: Run[] }
+  /** A contents line: the title (leader dots removed), its page as printed, depth 1–3 from its indent. */
+  | { kind: 'toc'; runs: Run[]; page: string; level: 1 | 2 | 3 }
   | { kind: 'code'; text: string }
   | { kind: 'image'; file: string; width: number; height: number; alt: string }
 

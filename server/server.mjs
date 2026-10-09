@@ -579,8 +579,8 @@ async function pageOf(book, n) {
   return shared(extracting, key, async () => {
     let answer
     try {
-      const { items, images, width, height } = await doc.pageContent(n)
-      const blocks = pageBlocks(items, images, book.textProfile)
+      const { items, images, width, height, top, bottom } = await doc.pageContent(n)
+      const blocks = pageBlocks(items, images, book.textProfile, { top, bottom, pageNumber: n })
       answer = { page: n, pages: doc.pages, blocks, scanned: isScanned(items, images, width, height) }
     } catch (error) {
       answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: errorLine(error) }

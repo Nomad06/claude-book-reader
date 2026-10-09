@@ -1,6 +1,6 @@
 // Pure: pdf.js text items of one page → blocks the dock draws (headings,
-// paragraphs, lists, captions, code, images). Heuristics on size, font and
-// position; no pdf.js here, so this is tested on plain data.
+// paragraphs, lists, captions, contents lines, code, images). Heuristics on
+// size, font and position; no pdf.js here, so this is tested on plain data.
 
 import { cleanRun } from './text.mjs'
 
@@ -10,6 +10,24 @@ const LIST_MARK = /^(?:[•◦▪●\-–—]|\d{1,3}[.)])\s+\S/
 const CAPTION = /^(?:Figure|Fig\.|Table|Listing|Example|Рис\.|Рисунок|Таблица|Листинг|Пример)\s+\d/i
 const BOLD = /bold|semibold|black|heavy/i
 const ITALIC = /italic|oblique/i
+
+// Running heads and folios sit in a band at the top and the foot of the page
+// (the test book's heads are 7–8% down from the top edge, chapter titles 13%+).
+const RUNNING_BAND = 0.1 // of the page height
+const RUNNING_MAX_RATIO = 1.35 // × body size: a head may be set a little larger than the text, a title is far larger
+const RUNNING_MAX_CHARS = 120
+const RUNNING_GAP = 2 // × the smaller line height of it and its neighbour: a head stands apart from the text
+const FOLIO = /^\d{1,4}$/
+// A footnote: a number, a space, text smaller than the body.
+const NOTE_MARK = /^\d{1,3}\s+\S/
+const NOTE_RATIO = 0.95
+// Indented body lines set this much wider apart than the page's own line pitch are separate items
+// (list items whose bullets are drawn, table rows); prose at the margin keeps the fixed rule, since
+// a line with inline math may sit a little apart from its neighbours.
+const PITCH_SPLIT = 1.2
+// A contents line: a title, a leader (dots, middle dots, ellipses, spaced or not), the page it points at.
+const PAGE_AT_END = /(\d{1,4}(?: \d{1,3})?|[ivxlcdm]{1,8})\s*$/ // "1 91": pdf.js may split the number
+const LEADER_MARK = /[.·∙…]/
 
 const round = n => Math.round(n * 2) / 2
 
@@ -53,6 +71,7 @@ export function linesOf(items) {
     else lines.push({ y: it.y, size: it.size, items: [it] })
   }
   for (const line of lines) {
+    line.y = baselineOf(line.items)
     line.items.sort((a, b) => a.x - b.x)
     line.x = line.items[0].x
     line.right = maxOf(line.items, it => it.x + it.width)
@@ -61,6 +80,21 @@ export function linesOf(items) {
     line.text = joinItems(line.items)
   }
   return lines
+}
+
+/** The baseline most of a line's text sits on: a superscript note mark does not lift the line. */
+function baselineOf(items) {
+  const chars = new Map()
+  for (const it of items) chars.set(round(it.y), (chars.get(round(it.y)) ?? 0) + it.text.length)
+  let y = items[0].y
+  let best = -1
+  for (const [at, n] of chars) {
+    if (n > best) {
+      best = n
+      y = at
+    }
+  }
+  return y
 }
 
 /** The line's text; a gap wider than a fifth of the size between items becomes a space. */
@@ -131,11 +165,22 @@ export function isScanned(items, images, width, height) {
   return items.every(item => !item.text.trim()) && images.some(img => img.w * img.h >= 0.5 * width * height)
 }
 
-export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS } = {}) {
+/**
+ * `top`/`bottom` are the page box's edges in the items' coordinates and
+ * `pageNumber` the page's number in the PDF: with them, running heads and
+ * folios are dropped by position on every page, not only those calibrated.
+ */
+export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, top, bottom, pageNumber } = {}) {
   const body = profile?.bodySize ?? 10
   const headers = profile?.headers ?? []
-  const lines = linesOf(items).filter(line => cleanRun(line.text).trim() !== '' && !isHeader(line, headers))
-  const headingSizes = [...new Set(lines.filter(l => l.size >= body * HEADING_RATIO).map(l => round(l.size)))].sort((a, b) => b - a)
+  const kept = linesOf(items).filter(line => cleanRun(line.text).trim() !== '' && !isHeader(line, headers))
+  for (const line of kept) line.toc = line.mono ? null : splitLeader(cleanRun(line.text))
+  const lines = withoutRunning(kept, { top, bottom, pageNumber, body })
+  const frame = { left: lines.reduce((m, l) => Math.min(m, l.x), Infinity), right: maxOf(lines, l => l.right) }
+  const levelOf = tocLevels(lines, frame.left)
+  const pitch = pitchOf(lines, body)
+  const isBodySize = line => Math.abs(line.size - body) < 0.5
+  const headingSizes = [...new Set(lines.filter(l => !l.toc && l.size >= body * HEADING_RATIO).map(l => round(l.size)))].sort((a, b) => b - a)
   const pending = images.filter(img => img && Number.isFinite(img.y)).slice(0, MAX_IMAGES).sort((a, b) => b.y - a.y)
   const blocks = []
   let open = null // { kind: 'para' | 'list' | 'code', ... }
@@ -147,6 +192,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS }
     else blocks.push({ kind: open.kind, runs: runsOf(open.items) })
     open = null
   }
+  const start = (kind, line, extra) => ({ kind, items: [...line.items], minX: line.x, right: line.right, size: line.size, rows: 1, ...extra })
   const placeImagesAbove = y => {
     while (pending.length > 0 && (y === null || pending[0].y >= y)) {
       flush()
@@ -169,6 +215,16 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS }
         for (let i = 0; i < blanks; i++) open.lines.push({ x: null, text: '' })
       }
       open.lines.push({ x: line.x, text })
+    } else if (line.toc) {
+      // A title that wrapped before its leader: the line or two just above, as wide as the entry, join it.
+      if (open?.titleFirst && open.rows <= 2 && gap <= 1.5 * lineHeight && line.x >= open.minX - 1 && Math.abs(open.size - line.size) < 0.5 && open.right >= line.right - 0.35 * (line.right - open.minX)) {
+        joinLine(open, line)
+        blocks.push(tocBlock(open.items, levelOf(open.minX)))
+        open = null
+      } else {
+        flush()
+        blocks.push(tocBlock(line.items, levelOf(line.x)))
+      }
     } else if (line.size >= body * HEADING_RATIO) {
       flush()
       blocks.push({ kind: 'heading', level: Math.min(3, headingSizes.indexOf(round(line.size)) + 1), runs: runsOf(line.items) })
@@ -177,12 +233,23 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS }
       blocks.push({ kind: 'caption', runs: runsOf(line.items) })
     } else if (LIST_MARK.test(text)) {
       flush()
-      open = { kind: 'list', items: [...line.items], markerX: line.x, minX: line.x }
-    } else if (open && open.kind !== 'code' && gap <= 1.5 * lineHeight && continues(open, line)) {
+      open = start('list', line, { markerX: line.x })
+    } else if (NOTE_MARK.test(text) && line.size < NOTE_RATIO * body) {
+      flush()
+      open = start('para', line, { note: true })
+    } else if (
+      open &&
+      open.kind !== 'code' &&
+      gap <= 1.5 * lineHeight &&
+      !(pitch !== null && line.x > frame.left + 1 && isBodySize(line) && isBodySize(prev) && gap > PITCH_SPLIT * pitch) &&
+      continues(open, line, frame)
+    ) {
       joinLine(open, line)
     } else {
       flush()
-      open = { kind: 'para', items: [...line.items], minX: line.x }
+      // At the page's start or after a heading or contents line, a paragraph may be a contents title that wraps.
+      const last = blocks.at(-1)
+      open = start('para', line, { titleFirst: !last || last.kind === 'toc' || last.kind === 'heading' })
     }
     prev = line
   }
@@ -200,9 +267,16 @@ function isShown(block) {
   return block.runs.length > 0
 }
 
-function continues(open, line) {
+function continues(open, line, frame) {
   if (open.kind === 'list') return line.x > open.markerX + 1
-  return line.x <= open.minX + 1
+  // A footnote's lines hang under its text or sit at its marker; all are set small like it.
+  if (open.note) return line.x >= open.minX - 1 && Math.abs(line.size - open.size) < 0.5
+  if (line.x <= open.minX + 1) return true
+  // Flush right and well in from the margin (an attribution under a quote): the lines run on.
+  // A first-line indent is far smaller, so it still starts a paragraph.
+  const inset = 0.2 * (frame.right - frame.left)
+  const atRight = right => right >= frame.right - 0.5 * line.size
+  return atRight(open.right) && atRight(line.right) && open.minX - frame.left > inset && line.x - frame.left > inset
 }
 
 /** Appends a line's items to an open paragraph: a space between, or a hyphen removed. */
@@ -215,6 +289,113 @@ function joinLine(open, line) {
   else if (!last.text.endsWith(' ') && !first.text.startsWith(' ')) open.items.push({ ...last, text: ' ' })
   for (const it of line.items) open.items.push(it)
   open.minX = Math.min(open.minX, line.x)
+  open.right = line.right
+  open.rows++
+}
+
+/** The page's usual distance between body lines (the most common one, seen three times or more), or null. */
+function pitchOf(lines, body) {
+  const counts = new Map()
+  for (let i = 1; i < lines.length; i++) {
+    const [a, b] = [lines[i - 1], lines[i]]
+    if (a.mono || b.mono || Math.abs(a.size - body) >= 0.5 || Math.abs(b.size - body) >= 0.5) continue
+    const d = round(a.y - b.y)
+    if (d > 0 && d < 3 * body) counts.set(d, (counts.get(d) ?? 0) + 1)
+  }
+  let pitch = null
+  let seen = 2
+  for (const [d, n] of counts) {
+    if (n > seen) {
+      seen = n
+      pitch = d
+    }
+  }
+  return pitch
+}
+
+// ---------------------------------------------------------------- running heads
+
+/**
+ * The lines without the running head at the top and the folio line at the foot:
+ * the outermost line in its band, apart from the text, not much larger than it,
+ * short, with a page number at either end (the PDF's own number, or any). At the
+ * foot a small line starting with a number is a footnote and stays.
+ */
+function withoutRunning(lines, { top, bottom, pageNumber, body }) {
+  if (typeof top !== 'number' || typeof bottom !== 'number' || !Number.isFinite(top) || !Number.isFinite(bottom) || top <= bottom) return lines
+  const band = RUNNING_BAND * (top - bottom)
+  const folio = Number.isInteger(pageNumber) && pageNumber > 0 ? String(pageNumber) : null
+  const first = lines[0]
+  const last = lines.at(-1)
+  const drop = new Set()
+  if (first && first.y >= top - band && isRunning(first, lines[1], 'top', body, folio)) drop.add(first)
+  if (last && last !== first && last.y <= bottom + band && isRunning(last, lines.at(-2), 'foot', body, folio)) drop.add(last)
+  return drop.size > 0 ? lines.filter(line => !drop.has(line)) : lines
+}
+
+function isRunning(line, next, edge, body, folio) {
+  const text = cleanRun(line.text).trim()
+  if (line.mono || line.toc || text.length > RUNNING_MAX_CHARS || line.size > RUNNING_MAX_RATIO * body) return false
+  if (next && Math.abs(line.y - next.y) < RUNNING_GAP * 1.2 * Math.min(line.size, next.size)) return false
+  const words = text.replace(/[|·•–—]/g, ' ').trim().split(/\s+/)
+  const head = words[0]
+  const tail = words.at(-1)
+  if (folio && (head === folio || tail === folio)) return true
+  if (edge === 'foot' && words.length > 1 && NOTE_MARK.test(text) && line.size < NOTE_RATIO * body) return false
+  return FOLIO.test(head) || FOLIO.test(tail)
+}
+
+// ---------------------------------------------------------------- contents lines
+
+/**
+ * A contents line's title (untrimmed, from the line's start) and page, or null.
+ * The leader is three dots or more, or two ellipses. Read back from the line's
+ * end, so a hostile line of dots costs linear time.
+ */
+function splitLeader(text) {
+  const page = PAGE_AT_END.exec(text)
+  if (!page) return null
+  let i = page.index - 1
+  let marks = 0
+  let ellipsis = false
+  for (; i >= 0; i--) {
+    const c = text[i]
+    if (LEADER_MARK.test(c)) {
+      marks++
+      if (c === '…') ellipsis = true
+    } else if (!/\s/.test(c)) break
+  }
+  if (marks < 3 && !(marks >= 2 && ellipsis)) return null
+  const title = text.slice(0, i + 1)
+  return /\S/.test(title) ? { title, page: page[1].replace(/ /g, '') } : null
+}
+
+/** Levels 1–3 from the indent: the step is the smallest indent between entries on the page, else 1.5 × their size. */
+function tocLevels(lines, left) {
+  const entries = lines.filter(l => l.toc)
+  const xs = [...new Set(entries.map(l => round(l.x)))].sort((a, b) => a - b)
+  const size = entries[0]?.size ?? 10
+  let step = Infinity
+  for (let i = 1; i < xs.length; i++) if (xs[i] - xs[i - 1] >= 0.25 * size) step = Math.min(step, xs[i] - xs[i - 1])
+  if (!Number.isFinite(step)) step = 1.5 * size
+  return x => Math.min(3, Math.max(1, 1 + Math.round((x - left) / step)))
+}
+
+/** One contents entry from its items: the title's runs (leader and page cut off), the page, the level. */
+function tocBlock(items, level) {
+  const runs = runsOf(items)
+  const found = splitLeader(runs.map(r => r.text).join(''))
+  if (!found) return { kind: 'para', runs }
+  const title = []
+  let left = found.title.length
+  for (const run of runs) {
+    if (left <= 0) break
+    title.push({ ...run, text: run.text.slice(0, left) })
+    left -= run.text.length
+  }
+  title[0].text = title[0].text.trimStart()
+  title[title.length - 1].text = title[title.length - 1].text.trimEnd()
+  return { kind: 'toc', runs: title.filter(run => run.text !== ''), page: found.page, level }
 }
 
 function codeText(open) {
