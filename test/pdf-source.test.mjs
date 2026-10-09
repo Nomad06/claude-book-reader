@@ -328,6 +328,12 @@ describe('figures drawn with paths', () => {
     assert.ok(content.drawings.some(b => near(b, { left: 120, bottom: 480, right: 380, top: 640 })))
     assert.ok(!content.drawings.some(b => b.right - b.left >= 600), 'the clip rectangle is not a drawing')
     assert.ok(content.items.every(it => it.upright === true), 'text set straight is upright')
+  })
+
+  test('slanted text (a fake italic) is still upright: a skew is not a turn', async () => {
+    const { content, blocks } = await figureBlocks(source, 'slanted.pdf', { skew: 0.2 })
+    assert.ok(content.items.every(it => it.upright === true))
+    assert.ok(blocks.some(b => b.kind === 'figure'))
     assert.deepEqual(
       blocks.map(b => b.kind),
       ['para', 'figure', 'caption', 'para'],
@@ -391,7 +397,7 @@ describe('figures drawn with paths', () => {
   test('a render past its time is cancelled and gives nothing; in time, it gives the picture', async t => {
     if (!(await loadCanvas())) return t.skip(NO_CANVAS)
     // Thousands of wide curves: more than one ~15 ms slice of pdf.js drawing.
-    const { doc, blocks } = await figureBlocks(source, 'slow.pdf', { strokes: 3000 })
+    const { doc, blocks } = await figureBlocks(source, 'slow.pdf', { strokes: 8000 })
     const started = Date.now()
     assert.equal(await doc.renderFigure(1, blocks[1].region, { timeoutMs: 1, index: 0 }), null)
     const spent = Date.now() - started

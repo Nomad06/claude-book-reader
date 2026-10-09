@@ -116,15 +116,15 @@ export function buildScannedPdf({ width = 612, height = 792, pixels = 32, copies
  * (150..350 × 500..620) inside a stroked black frame (120..380 × 480..640), a
  * clipping rectangle that paints nothing, then "Figure 1. A box." and a line
  * below. Helvetica, 10 pt. `strokes` adds that many wide curves across the box:
- * a figure slow to render.
+ * a figure slow to render; `skew` slants the text (a fake italic).
  */
-export function buildDrawingPdf({ width = 612, height = 792, strokes = 0 } = {}) {
+export function buildDrawingPdf({ width = 612, height = 792, strokes = 0, skew = 0 } = {}) {
   const objects = []
   const add = body => (objects.push(body), objects.length)
   const catalogId = add('')
   const pagesId = add('')
   const fontId = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>')
-  const text = (y, s) => `BT /F1 10 Tf 1 0 0 1 72 ${y} Tm (${esc(s)}) Tj ET`
+  const text = (y, s) => `BT /F1 10 Tf 1 0 ${skew} 1 72 ${y} Tm (${esc(s)}) Tj ET`
   const stream = [
     text(700, 'Some text above the figure.'),
     `q 0 0 ${width} ${height} re W n Q`,

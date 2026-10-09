@@ -139,7 +139,7 @@ function itemsOf(textContent, fontOf) {
     if (!('str' in it) || it.str === '') continue
     const style = textContent.styles[it.fontName] ?? {}
     const font = fontOf(it.fontName)
-    const [a, b, c, d] = it.transform
+    const [a, b, , d] = it.transform
     items.push({
       text: it.str,
       x: it.transform[4],
@@ -150,8 +150,8 @@ function itemsOf(textContent, fontOf) {
       font: font?.name ?? '',
       mono: style.fontFamily === 'monospace' || font?.isMonospace === true,
       eol: it.hasEOL === true,
-      // Set straight, not turned (a landscape figure's labels): only then does its position place a figure.
-      upright: a > 0 && d > 0 && Math.abs(b) + Math.abs(c) <= 0.01 * Math.max(a, d),
+      // Not turned (a landscape figure's labels); a slant (fake italic) is fine: only then does its position place a figure.
+      upright: a > 0 && d > 0 && Math.abs(b) <= 0.01 * Math.max(a, d),
     })
   }
   return items
@@ -251,6 +251,7 @@ function makeDoc(pdf, doc, task, id, imagesDir, renderer) {
       task.onContinue = next => {
         if (Date.now() < deadline) return void setImmediate(next)
         late = true
+        render = null // cancelled here; the race below settles it
         task.cancel()
       }
       // While pdf.js waits (on its operator list, fonts or pictures) no slice runs: a timer stops that too.
