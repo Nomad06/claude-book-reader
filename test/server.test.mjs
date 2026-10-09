@@ -524,6 +524,27 @@ describe('text mode', () => {
     assert.ok(await fs.stat(second.json.blocks[0].file).catch(() => null))
   })
 
+  test('a page that failed to extract is not cached: the next request tries again', async () => {
+    const id = await addRealPdf('transient.pdf', buildScannedPdf())
+    const pages = path.join(dataDir, 'pages')
+    // A file where the pictures folder goes: writing the page's picture fails.
+    await fs.rm(pages, { recursive: true, force: true })
+    await fs.writeFile(pages, 'not a folder')
+    try {
+      const failed = await request('GET', `/api/books/${id}/page/1`)
+      assert.equal(failed.status, 200)
+      assert.ok(failed.json.error)
+      assert.deepEqual(failed.json.blocks, [])
+    } finally {
+      await fs.rm(pages, { force: true })
+      await fs.mkdir(pages, { recursive: true })
+    }
+    const retried = await request('GET', `/api/books/${id}/page/1`)
+    assert.equal(retried.json.error, undefined)
+    assert.equal(retried.json.scanned, true)
+    assert.equal(retried.json.blocks[0].kind, 'image')
+  })
+
   test('many requests at once for one page all get the same answer', async () => {
     const id = await addRealPdf('burst.pdf', buildPdf(TEXT))
     const all = await Promise.all(Array.from({ length: 12 }, () => request('GET', `/api/books/${id}/page/1`)))

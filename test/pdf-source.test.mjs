@@ -44,6 +44,19 @@ describe('text helpers', () => {
   test('cleanRun drops control characters and keeps spacing, newlines and tabs', () => {
     assert.equal(cleanRun('  a\u001b[0m\tb\n  c\u0007\u0085'), '  a[0m\tb\n  c')
   })
+
+  // Bidi controls reorder what the terminal draws (Trojan Source); the marks U+200E/F are kept.
+  const BIDI = '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'
+
+  test('plainText drops the bidi embedding, override and isolate controls', () => {
+    assert.equal(plainText(`ab${BIDI}c \u202edcba\u202c`), 'abc dcba')
+    assert.equal(plainText('a\u200eb\u200f'), 'a\u200eb\u200f')
+  })
+
+  test('cleanRun drops the bidi controls and keeps spacing', () => {
+    assert.equal(cleanRun(`  a${BIDI}\tb `), '  a\tb ')
+    assert.equal(cleanRun('a\u200eb'), 'a\u200eb')
+  })
 })
 
 describe('documents', () => {

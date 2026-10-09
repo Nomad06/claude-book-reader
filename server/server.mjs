@@ -31,7 +31,7 @@ import { nodeVersionProblem } from './node-version.mjs'
 import { clampLevels, errorLine, plainText } from './text.mjs'
 import { shared } from './shared.mjs'
 import { createPdfSource, sweepImages } from './pdf-source.mjs'
-import { calibrate, pageBlocks } from './page-blocks.mjs'
+import { calibrate, isScanned, pageBlocks } from './page-blocks.mjs'
 
 // Before anything else: pdf.js (text mode) needs a recent node. The mod shows
 // this line when the server fails to start.
@@ -581,11 +581,12 @@ async function pageOf(book, n) {
     try {
       const { items, images, width, height } = await doc.pageContent(n)
       const blocks = pageBlocks(items, images, book.textProfile)
-      const scanned = items.every(item => !item.text.trim()) && images.some(img => img.w * img.h >= 0.5 * width * height)
-      answer = { page: n, pages: doc.pages, blocks, scanned }
+      answer = { page: n, pages: doc.pages, blocks, scanned: isScanned(items, images, width, height) }
     } catch (error) {
       answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: errorLine(error) }
     }
+    // A failure may pass (a full disk, a folder gone): the next request tries again.
+    if (answer.error) return answer
     pageCache.set(key, answer)
     if (pageCache.size > PAGE_CACHE_MAX) pageCache.delete(pageCache.keys().next().value)
     return answer

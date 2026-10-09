@@ -126,6 +126,11 @@ function isHeader(line, headers) {
 
 // ---------------------------------------------------------------- blocks
 
+/** A scanned page: no text at all (blank items count as none) and a picture covering half the page or more. */
+export function isScanned(items, images, width, height) {
+  return items.every(item => !item.text.trim()) && images.some(img => img.w * img.h >= 0.5 * width * height)
+}
+
 export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS } = {}) {
   const body = profile?.bodySize ?? 10
   const headers = profile?.headers ?? []

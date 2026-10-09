@@ -6,7 +6,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { MAX_PAGE_CHARS, calibrate, linesOf, pageBlocks } from '../server/page-blocks.mjs'
+import { MAX_PAGE_CHARS, calibrate, isScanned, linesOf, pageBlocks } from '../server/page-blocks.mjs'
 
 /** One text item; `width` is 0.5 × size per character, like a typical serif. */
 function item(text, { x = 72, y, size = 10, font = 'ABCDEF+Minion-Regular', family = 'serif', mono = false, eol = true } = {}) {
@@ -326,5 +326,27 @@ describe('blocks', () => {
 
   test('an empty page gives no blocks', () => {
     assert.deepEqual(pageBlocks([], [], PROFILE), [])
+  })
+})
+
+// Review Focus 1: PDF.js gives `""` items with hasEOL between lines; only a page-sized picture makes a page scanned.
+describe('scanned', () => {
+  const blank = [item('', { y: 700 }), item('', { y: 687 }), item('  ', { y: 674 })]
+  const picture = (w, h) => ({ file: '/data/pages/x.rgb', width: 32, height: 32, x: 0, y: h, w, h })
+
+  test('blank items and no picture: not scanned', () => {
+    assert.equal(isScanned(blank, [], 612, 792), false)
+  })
+
+  test('blank items and only a small picture: not scanned', () => {
+    assert.equal(isScanned(blank, [picture(100, 100)], 612, 792), false)
+  })
+
+  test('blank items and a page-sized picture: scanned', () => {
+    assert.equal(isScanned(blank, [picture(612, 792)], 612, 792), true)
+  })
+
+  test('text on the page: never scanned, whatever the picture', () => {
+    assert.equal(isScanned([item('Body text.', { y: 700 })], [picture(612, 792)], 612, 792), false)
   })
 })
