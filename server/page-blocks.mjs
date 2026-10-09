@@ -13,11 +13,39 @@ const ITALIC = /italic|oblique/i
 
 const round = n => Math.round(n * 2) / 2
 
+// PDF content is untrusted: positions, sizes and text come straight from the file.
+const MAX_ITEMS = 100000
+const MAX_ITEM_CHARS = 5000
+const MAX_SIZE = 1000
+const MAX_INDENT = 80
+const MAX_BLANK_LINES = 5
+const MAX_IMAGES = 200
+
+/** Items with finite position and a usable size; width and text made safe; at most MAX_ITEMS. */
+function sane(items) {
+  const out = []
+  for (const it of items) {
+    if (out.length >= MAX_ITEMS) break
+    if (!it || typeof it.text !== 'string' || it.text === '') continue
+    if (!Number.isFinite(it.x) || !Number.isFinite(it.y) || !Number.isFinite(it.size) || it.size <= 0) continue
+    out.push({
+      ...it,
+      size: Math.min(it.size, MAX_SIZE),
+      width: Number.isFinite(it.width) && it.width > 0 ? it.width : 0,
+      font: typeof it.font === 'string' ? it.font : '',
+      text: it.text.length > MAX_ITEM_CHARS ? it.text.slice(0, MAX_ITEM_CHARS) : it.text,
+    })
+  }
+  return out
+}
+
+const maxOf = (list, f) => list.reduce((m, v) => Math.max(m, f(v)), -Infinity)
+
 // ---------------------------------------------------------------- lines
 
 /** Items grouped by baseline (top of the page first), each line's items left to right. */
 export function linesOf(items) {
-  const sorted = items.filter(it => it.text !== '').sort((a, b) => b.y - a.y || a.x - b.x)
+  const sorted = sane(items).sort((a, b) => b.y - a.y || a.x - b.x)
   const lines = []
   for (const it of sorted) {
     const last = lines.at(-1)
@@ -27,8 +55,8 @@ export function linesOf(items) {
   for (const line of lines) {
     line.items.sort((a, b) => a.x - b.x)
     line.x = line.items[0].x
-    line.right = Math.max(...line.items.map(it => it.x + it.width))
-    line.size = Math.max(...line.items.map(it => it.size))
+    line.right = maxOf(line.items, it => it.x + it.width)
+    line.size = maxOf(line.items, it => it.size)
     line.mono = line.items.every(it => it.mono)
     line.text = joinItems(line.items)
   }
@@ -54,7 +82,7 @@ export function calibrate(samples) {
   const sizes = new Map()
   const seenOn = new Map()
   for (const items of samples) {
-    for (const it of items) {
+    for (const it of sane(items)) {
       const s = round(it.size)
       sizes.set(s, (sizes.get(s) ?? 0) + it.text.length)
     }
@@ -101,9 +129,9 @@ function isHeader(line, headers) {
 export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS } = {}) {
   const body = profile?.bodySize ?? 10
   const headers = profile?.headers ?? []
-  const lines = linesOf(items).filter(line => line.text.trim() !== '' && !isHeader(line, headers))
+  const lines = linesOf(items).filter(line => cleanRun(line.text).trim() !== '' && !isHeader(line, headers))
   const headingSizes = [...new Set(lines.filter(l => l.size >= body * HEADING_RATIO).map(l => round(l.size)))].sort((a, b) => b - a)
-  const pending = [...images].sort((a, b) => b.y - a.y)
+  const pending = images.filter(img => img && Number.isFinite(img.y)).slice(0, MAX_IMAGES).sort((a, b) => b.y - a.y)
   const blocks = []
   let open = null // { kind: 'para' | 'list' | 'code', ... }
   let prev = null
@@ -132,7 +160,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS }
         flush()
         open = { kind: 'code', size: line.size, lines: [] }
       } else {
-        const blanks = Math.max(0, Math.round(gap / lineHeight) - 1)
+        const blanks = Math.min(MAX_BLANK_LINES, Math.max(0, Math.round(gap / lineHeight) - 1))
         for (let i = 0; i < blanks; i++) open.lines.push({ x: null, text: '' })
       }
       open.lines.push({ x: line.x, text })
@@ -155,8 +183,16 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS }
   }
   flush()
   placeImagesAbove(null)
-  nameImages(blocks)
-  return cut(blocks, maxChars)
+  const shown = blocks.filter(isShown)
+  nameImages(shown)
+  return cut(shown, maxChars)
+}
+
+/** A block that says something: no text block without text. */
+function isShown(block) {
+  if (block.kind === 'image') return true
+  if (block.kind === 'code') return block.text.trim() !== ''
+  return block.runs.length > 0
 }
 
 function continues(open, line) {
@@ -172,16 +208,17 @@ function joinLine(open, line) {
   const nextLower = /^[a-zа-яё]/.test(first.text)
   if (endsHyphen && nextLower) open.items[open.items.length - 1] = { ...last, text: last.text.slice(0, -1) }
   else if (!last.text.endsWith(' ') && !first.text.startsWith(' ')) open.items.push({ ...last, text: ' ' })
-  open.items.push(...line.items)
+  for (const it of line.items) open.items.push(it)
   open.minX = Math.min(open.minX, line.x)
 }
 
 function codeText(open) {
   const xs = open.lines.map(l => l.x).filter(x => x !== null)
-  const left = Math.min(...xs)
-  const unit = 0.6 * open.size
+  const left = xs.reduce((m, x) => Math.min(m, x), Infinity)
+  const unit = 0.6 * open.size // size is finite and > 0 (see sane)
+  const indent = x => Math.min(MAX_INDENT, Math.max(0, Math.round((x - left) / unit)))
   return open.lines
-    .map(l => (l.x === null ? '' : ' '.repeat(Math.max(0, Math.round((l.x - left) / unit))) + cleanRun(l.text)))
+    .map(l => (l.x === null ? '' : ' '.repeat(indent(l.x)) + cleanRun(l.text)))
     .join('\n')
 }
 
@@ -221,7 +258,9 @@ function cut(blocks, maxChars) {
       left -= length
       continue
     }
-    if (block.kind === 'code') out.push({ kind: 'code', text: block.text.slice(0, left) })
+    if (left <= 0) {
+      // nothing of this block fits: no empty block, just the notice
+    } else if (block.kind === 'code') out.push({ kind: 'code', text: block.text.slice(0, left) })
     else if (block.kind !== 'image') {
       const runs = []
       for (const run of block.runs) {

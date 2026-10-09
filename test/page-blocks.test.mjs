@@ -228,9 +228,9 @@ describe('blocks', () => {
   test('cuts a page at maxChars and says so', () => {
     const items = lines(Array.from({ length: 40 }, (_, i) => `Line ${i} ` + 'x'.repeat(90)), { top: 700, leading: 1.2 })
     const blocks = pageBlocks(items, [], PROFILE, { maxChars: 500 })
-    const total = blocks.reduce((n, b) => n + (b.runs ? text(b).length : 0), 0)
-    assert.ok(total <= 500 + 40)
-    assert.match(text(blocks.at(-1)), /page cut at 500 characters/)
+    assert.deepEqual(blocks.map(b => b.kind), ['para', 'para'])
+    assert.equal(text(blocks[0]).length, 500)
+    assert.equal(text(blocks[1]), '… page cut at 500 characters')
     assert.equal(MAX_PAGE_CHARS, 20000)
   })
 
@@ -254,6 +254,74 @@ describe('blocks', () => {
     assert.equal(text(blocks[1]), 'Figure 1. Caption')
     assert.equal(text(blocks[2]), '\u2022 Item')
     assert.equal(blocks[3].text, 'code')
+  })
+
+  test('a cut that lands exactly on a block boundary adds no empty block', () => {
+    const items = [...lines(['a'.repeat(10)], { top: 700 }), ...lines(['b'.repeat(10)], { top: 650 }), ...lines(['c'.repeat(10)], { top: 600 })]
+    assert.deepEqual(pageBlocks(items, [], PROFILE, { maxChars: 20 }), [
+      { kind: 'para', runs: [{ text: 'a'.repeat(10) }] },
+      { kind: 'para', runs: [{ text: 'b'.repeat(10) }] },
+      { kind: 'para', runs: [{ text: '… page cut at 20 characters' }] },
+    ])
+    const code = [...lines(['a'.repeat(10)], { top: 700 }), ...lines(['x = 1'], { top: 650, mono: true, family: 'monospace' })]
+    assert.deepEqual(
+      pageBlocks(code, [], PROFILE, { maxChars: 10 }).map(b => b.kind),
+      ['para', 'para'],
+    )
+  })
+
+  test('lines of only control characters leave no empty block', () => {
+    const items = [
+      item('\u0007', { y: 720, size: 18 }),
+      ...lines(['\u001b', 'Figure 1. \u0007'], { top: 690 }),
+      ...lines(['\u0000\u0001'], { top: 650, mono: true, family: 'monospace' }),
+      ...lines(['Real text.'], { top: 630 }),
+    ]
+    const blocks = pageBlocks(items, [], PROFILE)
+    assert.ok(blocks.every(b => (b.kind === 'code' ? b.text !== '' : b.runs.length > 0)))
+    assert.deepEqual(
+      blocks.map(b => [b.kind, text(b)]),
+      [['caption', 'Figure 1. '], ['para', 'Real text.']],
+    )
+  })
+
+  test('a page of only empty items gives no blocks', () => {
+    const items = [item('', { y: 700 }), item('', { y: 687 }), item('', { y: 674 })]
+    assert.deepEqual(pageBlocks(items, [], PROFILE), [])
+  })
+
+  test('hostile sizes and positions are bounded and never throw', () => {
+    const mono = { mono: true, family: 'monospace' }
+    const items = [
+      item('code a', { x: 0, y: 700, size: 0, ...mono }),
+      item('code b', { x: 1e9, y: 690, size: 1e-9, ...mono }),
+      item('code c', { x: 1e9, y: 680, size: 8, ...mono }),
+      item('code d', { x: 0, y: 1e12, size: 8, ...mono }),
+      item('code e', { x: 0, y: -1e12, size: 8, ...mono }),
+      item('nan x', { x: NaN, y: 600 }),
+      item('nan y', { x: 72, y: NaN }),
+      item('inf size', { x: 72, y: 590, size: Infinity }),
+      item('neg size', { x: 72, y: 580, size: -5 }),
+      { ...item('nan width', { x: 72, y: 570 }), width: NaN },
+      item('huge', { x: 72, y: 560, size: 1e300 }),
+      item('long ' + 'z'.repeat(1e6), { x: 72, y: 550 }),
+    ]
+    const images = [{ file: '/p/x.rgb', width: 10, height: 10, x: 0, y: NaN, w: 1, h: 1 }]
+    const started = Date.now()
+    const blocks = pageBlocks(items, images, PROFILE)
+    assert.ok(Date.now() - started < 2000)
+    const chars = blocks.reduce((n, b) => n + (b.kind === 'code' ? b.text.length : b.runs ? text(b).length : 0), 0)
+    assert.ok(chars <= MAX_PAGE_CHARS + 100)
+    for (const b of blocks) if (b.kind === 'code') assert.ok(b.text.split('\n').every(l => l.length <= 80 + 20))
+    calibrate([items, items])
+  })
+
+  test('a huge baseline gap in code adds a few blank lines at most; a line of many items does not overflow the stack', () => {
+    const mono = { mono: true, family: 'monospace', size: 8 }
+    const code = pageBlocks([item('a', { y: 700, ...mono }), item('b', { y: -1e9, ...mono })], [], PROFILE)
+    assert.ok(code[0].text.split('\n').length <= 8)
+    const many = Array.from({ length: 150000 }, (_, i) => item('w', { x: 72 + i * 0.001, y: 700, eol: false }))
+    assert.ok(pageBlocks(many, [], PROFILE).length >= 1)
   })
 
   test('an empty page gives no blocks', () => {
