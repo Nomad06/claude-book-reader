@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Text mode: `/book mode text` reads the book inside the Reading Dock, one page at a time, with headings, lists, code blocks and (on kitty and Ghostty) pictures; `o` opens the browser at the same page. The reader server extracts pages with pdf.js.
+- Node 22.13 or newer is required (pdf.js in Node); the server refuses to start on an older one and says so. pdf.js is vendored as its legacy build, which the browser viewer uses too.
 - Reading Dock: a pane beside the transcript (fullscreen terminal, 144+ columns when it opens by itself) with the book's progress, a read-pages strip, chapters with ticks and the running task. It replaces the "task finished" band while it is shown. Press a chapter to jump there; `l` opens the library, `o` the reader. `/book dock` folds it to a status-line badge and back; a folded dock, or one closed by hand, stays closed through tasks until `/book` or `/book dock`.
 - The reader reports each book's contents to the reader server, and `/api/show` takes a page.
 - Book and chapter titles lose control characters (no terminal escape sequences from a PDF), and page counts over 100000 are refused.

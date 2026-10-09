@@ -34,6 +34,12 @@ the reader tells you and asks whether to close the book or keep reading.
   a chapter to jump there, `l` for your library, `o` to raise the reader. When
   the task ends it says how long it took and how many pages you read meanwhile.
   `/book dock` folds it to the status line and back.
+- **Text mode: read inside the terminal.** `/book mode text` and the book opens
+  as text in the Reading Dock instead of a browser window: headings, paragraphs,
+  lists and code blocks, one page at a time (`n` / `p`, `g` to go to a page),
+  pictures on kitty and Ghostty, a one-line placeholder elsewhere. `o` opens the
+  browser at the same page any time, for tables, figures or a scanned page.
+  The desktop app's Code tab reads this way too.
 - **Local and offline.** PDF.js is bundled, the reader server listens on
   `127.0.0.1` only, and nothing is sent anywhere.
 
@@ -138,6 +144,8 @@ Pick a book once, then just work:
 | `/book <n>` | Switch to book number *n* of the list |
 | `/book close` | Close the reader window (your place is kept) |
 | `/book dock` | Show the Reading Dock beside the transcript, or fold it to the status line |
+| `/book mode text` / `browser` | Read in the Reading Dock as text, or in the browser window |
+| `/book open browser` | Open the browser window at the current page, whatever the mode |
 | `/book auto on` / `off` | Open the book by itself while a task runs, or not |
 | `/book delay <seconds>` | How long a task must run before the book opens (`0`: at once) |
 | `/book status` | What is set up |
@@ -162,6 +170,23 @@ Pick a book once, then just work:
 
 When a task finishes, `Esc` keeps reading and `C` closes the book.
 
+### Reader keys in text mode
+
+With the Reading Dock focused:
+
+| Key | |
+| --- | --- |
+| `n` / `p` | Next / previous page |
+| `g` | Go to page: focuses the "page" field; type a number and press Enter |
+| `m` | Mark the page read or unread |
+| `o` | Open the browser at this page |
+| `d` | Back to the dashboard |
+| `l` | Your library |
+| `r` | From the dashboard (in text mode): read here, back to the page |
+
+When a task finishes, the done box appears in the reader: `c` closes the book
+(the pane returns to the dashboard), `k` keeps reading.
+
 ## Settings
 
 In `/config` (or `/plugin configure book-reader@claude-book-reader`):
@@ -170,6 +195,7 @@ In `/config` (or `/plugin configure book-reader@claude-book-reader`):
 | --- | --- | --- |
 | Open the book automatically | on | Same as `/book auto on` / `off` |
 | Delay before opening (seconds) | 5 | Same as `/book delay` |
+| Reading mode | browser | Same as `/book mode text` / `browser` |
 | Reader window | `app` | `app`: its own window in Chrome, Edge, Brave, Chromium or Vivaldi; `browser`: a tab in your default browser |
 | Desktop notification when a task finishes | on | On Linux this needs `notify-send` |
 | Reader server port | 47321 | Change it if another program uses that port |
@@ -214,6 +240,9 @@ Security details are in [SECURITY.md](SECURITY.md).
   same time, the reader shows the events of both.
 - **Early-access Claude Code API.** The mod is built on function hooks, which
   Claude Code may change between releases.
+- Text mode reads the PDF's own text: scanned books have none (use `o` for the
+  browser), two-column layouts and tables come out as plain paragraphs, and
+  mathematics is not laid out.
 - A browser only lets a page close windows it opened itself; when it refuses,
   the reader shows "Bookmarked" and you close the window yourself.
 
@@ -223,12 +252,15 @@ Security details are in [SECURITY.md](SECURITY.md).
 .claude-plugin/plugin.json        manifest and settings
 .claude-plugin/marketplace.json   lets the repo be added as a marketplace
 hooks/register.tsx                the mod: /book, turn hooks, the band above the prompt
-hooks/register.test.tsx           its tests (claude plugin test)
+hooks/dock.tsx, hooks/reader.tsx  the Reading Dock: dashboard and the text reader view
+hooks/*-logic.ts                  their pure helpers (unit-tested)
+hooks/*.test.tsx                  the mod's tests (claude plugin test)
 types/index.d.ts                  the mod's state contract
 server/server.mjs                 the reader server, no dependencies
 server/platform.mjs               what it runs on macOS, Linux and Windows (pure, unit-tested)
-test/server.test.mjs              server tests over HTTP (node --test)
-test/platform.test.mjs            per-OS command tests; parses the PowerShell scripts where PowerShell exists
+server/pdf-source.mjs             opens a PDF with PDF.js in Node: text items, images, outline
+server/page-blocks.mjs            turns a page's text items into headings, paragraphs, lists, code (pure)
+test/*.test.mjs                   server and extraction tests (node --test); platform tests parse the PowerShell scripts where PowerShell exists
 viewer/                           the reader page; viewer/vendor/pdfjs is PDF.js
 scripts/update-pdfjs.sh           re-vendors PDF.js
 ```
@@ -237,8 +269,8 @@ scripts/update-pdfjs.sh           re-vendors PDF.js
 npm test
 ```
 
-runs all three suites (`node --test test/platform.test.mjs test/server.test.mjs`
-and `claude plugin test .`); CI runs them on macOS, Linux and Windows;
+runs both suites (`node --test "test/*.test.mjs"` and `claude plugin test .`); it needs
+Node 22.13 or newer, the floor of the reader server (pdf.js in Node). CI runs them on macOS, Linux and Windows;
 `npm run validate` runs `claude plugin validate .`.
 
 While developing, load your clone with `claude --plugin-dir .`: Claude Code
@@ -248,7 +280,8 @@ reloads the mod when you save. Run `/book restart` after changing
 `npx tsc -p .` type-checks the mod.
 
 To move to another PDF.js version: `npm run update-pdfjs -- <version>`, then
-update the version in `NOTICE` and check the reader.
+update the version in `NOTICE` and check the reader and text mode. Only the
+`legacy/` build of PDF.js is vendored; the server and the browser viewer both use it.
 
 ## License
 
