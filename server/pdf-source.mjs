@@ -11,7 +11,8 @@ export const MAX_IMAGE_HEIGHT = 4096 // the terminal engine's Image limit
 export const MAX_IMAGE_FILES = 200
 export const MAX_PAGE_IMAGES = 40 // pictures written for one page: a page never sweeps its own files
 const MIN_IMAGE_SIDE = 24
-const IMAGE_WAIT_MS = 10_000
+// How long one page may wait, in all, for pictures pdf.js has not delivered; the rest are skipped.
+export const PAGE_IMAGE_WAIT_MS = 10_000
 const MAX_OUTLINE = 2000
 
 // pdf.js warns once at import that it cannot render (no canvas, no DOMMatrix,
@@ -155,7 +156,8 @@ function makeDoc(pdf, doc, task, id, imagesDir) {
       const items = itemsOf(tc, fontOf)
       const images = await imagesOf(pdf, page, ops, `${id}-${n}`, imagesDir)
       const [x0, y0, x1, y1] = page.view
-      return { items, images, width: x1 - x0, height: y1 - y0 }
+      // top and bottom are the page box's edges in the items' coordinates: running heads are found by them.
+      return { items, images, width: x1 - x0, height: y1 - y0, top: y1, bottom: y0 }
     } finally {
       page.cleanup()
     }
@@ -197,8 +199,10 @@ function multiply(m, t) {
 // Walks the page's operators with the transform stack, so each image gets its
 // box on the page; writes each picture worth showing as raw RGB. The box math
 // is for unrotated images (the common case); a rotated image lands in the
-// wrong place among the lines and is out of scope.
-async function imagesOf(pdf, page, ops, prefix, imagesDir) {
+// wrong place among the lines and is out of scope. The page waits at most
+// `waitMs` in all for pictures pdf.js is slow to deliver; once that is spent,
+// the pictures left are skipped and those already written are kept.
+export async function imagesOf(pdf, page, ops, prefix, imagesDir, { waitMs = PAGE_IMAGE_WAIT_MS } = {}) {
   const OPS = pdf.OPS
   const stack = []
   let ctm = [1, 0, 0, 1, 0, 0]
@@ -220,9 +224,15 @@ async function imagesOf(pdf, page, ops, prefix, imagesDir) {
     }
   }
   const images = []
+  const deadline = Date.now() + waitMs
   for (const [k, hit] of found.entries()) {
     if (images.length >= MAX_PAGE_IMAGES) break
-    const img = typeof hit.source === 'string' ? await imageObject(page, hit.source) : hit.source
+    let img = hit.source
+    if (typeof img === 'string') {
+      const left = deadline - Date.now()
+      if (left <= 0) continue // the budget is spent: inline pictures after it still come, no wait needed
+      img = await imageObject(page, img, left)
+    }
     if (!img || !img.data || img.width < MIN_IMAGE_SIDE || img.height < MIN_IMAGE_SIDE) continue
     const rgb = toRgb(img)
     if (!rgb) continue
@@ -238,12 +248,12 @@ async function imagesOf(pdf, page, ops, prefix, imagesDir) {
 
 // pdf.js keeps an image used on several pages in the document's commonObjs under
 // a `g_` id, and the rest in the page's objs; asking the wrong one never answers.
-// A picture pdf.js never delivers is skipped after IMAGE_WAIT_MS, so it cannot
-// hold the page up.
-function imageObject(page, id) {
+// A picture pdf.js never delivers is given up after `waitMs`: what is left of the
+// page's budget, so it cannot hold the page up.
+function imageObject(page, id, waitMs) {
   const objs = id.startsWith('g_') ? page.commonObjs : page.objs
   return new Promise(resolve => {
-    const timer = setTimeout(() => resolve(null), IMAGE_WAIT_MS)
+    const timer = setTimeout(() => resolve(null), waitMs)
     objs.get(id, img => {
       clearTimeout(timer)
       resolve(img)

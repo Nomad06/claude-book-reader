@@ -9,7 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { MAX_IMAGE_HEIGHT, MAX_PAGE_IMAGES, MAX_IMAGE_WIDTH, createPdfSource, downscale, sweepImages, toRgb } from '../server/pdf-source.mjs'
+import { MAX_IMAGE_HEIGHT, MAX_PAGE_IMAGES, MAX_IMAGE_WIDTH, PAGE_IMAGE_WAIT_MS, createPdfSource, downscale, imagesOf, sweepImages, toRgb } from '../server/pdf-source.mjs'
 import { cleanRun, errorLine, plainText } from '../server/text.mjs'
 import { shared } from '../server/shared.mjs'
 import { TEXT, buildPdf, buildScannedPdf } from './pdf-fixture.mjs'
@@ -100,9 +100,10 @@ describe('outline', () => {
 describe('page content', () => {
   test('text items carry position, size, family and no empty strings', async () => {
     const doc = await source.open(await write('items.pdf', buildPdf(TEXT)))
-    const { items, images, width, height } = await doc.pageContent(1)
+    const { items, images, width, height, top, bottom } = await doc.pageContent(1)
     assert.equal(images.length, 0)
     assert.deepEqual([width, height], [612, 792])
+    assert.deepEqual([top, bottom], [792, 0]) // the page box edges, in the items' coordinates
     assert.ok(items.every(it => it.text !== ''))
     const [heading, body] = items
     assert.equal(heading.text, 'Chapter One')
@@ -218,6 +219,30 @@ describe('bounds', () => {
       } finally {
         await source.closeAll()
       }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('pictures pdf.js never delivers share one wait for the whole page', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'book-reader-wait-'))
+    try {
+      const OPS = { save: 1, restore: 2, transform: 3, paintFormXObjectBegin: 4, paintFormXObjectEnd: 5, paintImageXObject: 6, paintInlineImageXObject: 7 }
+      const picture = { width: 32, height: 32, kind: 2, data: new Uint8Array(32 * 32 * 3).fill(9) }
+      const asked = []
+      // One picture answers at once, the 40 after it never do.
+      const objs = { get: (id, callback) => (asked.push(id), id === 'img_ok' && callback(picture)) }
+      const page = { objs, commonObjs: objs }
+      const ids = ['img_ok', ...Array.from({ length: 40 }, (_, i) => `img_${i}`)]
+      const ops = { fnArray: ids.map(() => OPS.paintImageXObject), argsArray: ids.map(id => [id, 32, 32]) }
+      const started = Date.now()
+      const images = await imagesOf({ OPS }, page, ops, 'wait-1', dir, { waitMs: 200 })
+      const took = Date.now() - started
+      assert.ok(took < 1500, `the page waited ${took} ms for 40 lost pictures`)
+      assert.equal(images.length, 1)
+      assert.equal((await fs.stat(images[0].file)).size, 32 * 32 * 3)
+      assert.ok(asked.length < ids.length, 'once the budget is spent, the remaining pictures are not asked for')
+      assert.ok(PAGE_IMAGE_WAIT_MS <= 10_000)
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
