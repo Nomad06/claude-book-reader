@@ -368,6 +368,17 @@ describe('folio offset', () => {
     assert.equal(calibrate([page(50, 50).items, page(80, 80).items]).folioOffset, null)
     assert.equal(calibrate([]).folioOffset, null)
   })
+
+  test('two coincidences, an even split or impossible page numbers learn no offset', () => {
+    const foot = (n, last) => ({ page: n, items: [...body(['Текст страницы.', last], 300)] })
+    // "Total 15" on page 10 and "Total 25" on page 20: two pages agree on +5 by chance
+    assert.equal(calibrate([foot(10, 'Total 15'), foot(20, 'Total 25')]).folioOffset, null)
+    // plates: half the samples −4, half −12
+    const split = Array.from({ length: 12 }, (_, i) => page(20 + i * 40, i < 6 ? 16 + i * 40 : 8 + i * 40))
+    assert.equal(calibrate(split).folioOffset, null)
+    assert.equal(calibrate([{ ...page(1, 5), page: -5 }, { ...page(1, 4), page: -6 }, { ...page(1, 3), page: -7 }]).folioOffset, null)
+    assert.equal(calibrate([{ ...page(1, 5), page: 0.5 }, null, undefined, { page: 3 }, 5]).folioOffset, null)
+  })
 })
 
 describe('running heads by position', () => {
@@ -431,6 +442,25 @@ describe('running heads by position', () => {
     for (const [kept, items, n] of cases) {
       const shown = pageBlocks(items, [], eleven, { ...LETTER, pageNumber: n }).map(text).join(' | ')
       assert.ok(shown.includes(kept), `${kept} on page ${n}: ${shown}`)
+    }
+  })
+
+  // A chapter opening on printed page 1 or 3: its title carries the page's folio at its edge.
+  test('a page prints its folio once: a title carrying the same number stays', () => {
+    const LETTER = { top: 792, bottom: 0 }
+    const bodyText = [0, 1].map(i => item('The chapter begins here and runs on.', { x: 72, y: 700 - i * 12 }))
+    const cases = [
+      // thesis: front matter i–x on PDF pages 1–12, so "1" is printed on PDF page 13; the folio sits at the foot
+      ['1 Introduction', [item('1 Introduction', { x: 72, y: 745, size: 12, font: 'Times-Bold' }), ...bodyText, item('1', { x: 300, y: 40 })], { bodySize: 10, folioOffset: -12 }, 13],
+      // a regular-weight chapter label, folio at the foot
+      ['Chapter 3', [item('Chapter 3', { x: 72, y: 760, size: 12 }), ...bodyText, item('3', { x: 290, y: 40, size: 9 })], { bodySize: 10, folioOffset: -37 }, 40],
+      // no folio printed on the page at all: a bold first line is a numbered title, not a running head
+      ['1 Introduction', [item('1 Introduction', { x: 72, y: 745, size: 11, font: 'Times-Bold' }), ...bodyText.map(it => ({ ...it, size: 11 }))], { bodySize: 11, folioOffset: 0 }, 1],
+    ]
+    for (const [title, items, profile, n] of cases) {
+      const shown = pageBlocks(items, [], { headers: [], ...profile }, { ...LETTER, pageNumber: n }).map(text)
+      assert.ok(shown.includes(title), `${title} on page ${n}: ${JSON.stringify(shown)}`)
+      assert.ok(!shown.some(t => /^\d+$/.test(t)), `the folio line goes on page ${n}: ${JSON.stringify(shown)}`)
     }
   })
 
@@ -561,11 +591,35 @@ describe('contents lines', () => {
     )
   })
 
-  test('a short leader counts only beside another entry ending at the same right edge', () => {
-    const alone = [...body(['Текст страницы.'], 600), ...ruled(['Он ждал', ' . . . . . . ', '12'], { y: 587.9, size: 10 })]
+  test('a short leader (3–5 marks) counts only beside another entry ending at the same right edge', () => {
+    const alone = [...body(['Текст страницы.'], 600), ...ruled(['Он ждал', ' . . . . ', '12'], { y: 587.9, size: 10 })]
     assert.deepEqual(pageBlocks(alone, [], PROFILE, BOOK).map(b => b.kind), ['para'])
-    const pair = [...ruled(['Он ждал', ' . . . . . . ', '12'], { y: 600 }), ...ruled(['Она пришла', ' . . . . . . ', '14'], { y: 587 })]
+    const pair = [...ruled(['Он ждал', ' . . . ', '12'], { y: 600 }), ...ruled(['Она пришла', ' . . . . . . . . . . ', '14'], { y: 587 })]
     assert.deepEqual(pageBlocks(pair, [], PROFILE, BOOK).map(b => [b.kind, b.page]), [['toc', '12'], ['toc', '14']])
+  })
+
+  test('a leader of six marks or more is an entry on its own: the last entry of a contents page', () => {
+    const items = [...ruled(['Index', ' ........ ', '523'], { y: 600, size: 10 }), ...body(['Some text after contents.'], 560)]
+    assert.deepEqual(pageBlocks(items, [], PROFILE, BOOK).map(b => [b.kind, b.page]), [['toc', '523'], ['para', undefined]])
+  })
+
+  // LaTeX: long titles get a short spaced leader, every page number ends at the column's right edge.
+  test('contents rows with a short leader, right-aligned with their neighbours, are entries of their own', () => {
+    const items = [
+      ...ruled(['1.1 Introduction', ' . . . . . . . . . . . . . . . . . . . . ', '3'], { x: 60, y: 600, size: 10 }, 430),
+      ...ruled(['1.2 A rather long section title that nearly fills the line', ' . . . . ', '7'], { x: 60, y: 588, size: 10 }, 430),
+      ...ruled(['1.3 Background', ' . . . . . . . . . . . . . . . . . . . . ', '9'], { x: 60, y: 576, size: 10 }, 430),
+      ...ruled(['1.4 Another long section title that nearly fills the line', ' . . ', '12'], { x: 60, y: 564, size: 10 }, 430),
+      ...ruled(['1.5 Methods', ' . . . . . . . . . . . . . . . . . . . . . ', '15'], { x: 60, y: 552, size: 10 }, 430),
+    ]
+    assert.deepEqual(pageBlocks(items, [], PROFILE, BOOK).map(b => [b.kind, text(b), b.page]), [
+      ['toc', '1.1 Introduction', '3'],
+      ['toc', '1.2 A rather long section title that nearly fills the line', '7'],
+      ['toc', '1.3 Background', '9'],
+      // two marks: not a leader, yet its page ends at the column's edge, so it never joins the next entry
+      ['para', '1.4 Another long section title that nearly fills the line . . 12', undefined],
+      ['toc', '1.5 Methods', '15'],
+    ])
   })
 
   test('a line ending in an ellipsis and a number stays prose, and so does the line before it', () => {

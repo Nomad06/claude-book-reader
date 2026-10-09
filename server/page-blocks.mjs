@@ -29,11 +29,14 @@ const PITCH_SPLIT = 1.2
 // A contents line: a title, a leader (dots, middle dots, ellipses, spaced or not), the page it points at.
 const PAGE_AT_END = /(\d{1,4}(?: \d{1,3})?|[ivxlcdm]{1,8})\s*$/ // "1 91": pdf.js may split the number
 const LEADER_MARK = /[.·∙…]/
-// A leader's strength counts dots, an ellipsis as three. A strong leader is a contents line on its
-// own; a weak one only beside another leader line ending at the same right edge (a column of pages);
-// anything less ("1... 2... 3", "values 0 ... 255") is prose.
-const STRONG_LEADER = 12
-const WEAK_LEADER = 6
+// A leader's strength counts dots, an ellipsis as three. From ALONE_LEADER on it makes a contents line
+// by itself; from MIN_LEADER (a LaTeX row: long title, short spaced leader) only beside another leader
+// line ending at the same right edge, a column of pages; so "1... 2... 3" or "values 0 ... 255" alone
+// stay prose.
+const ALONE_LEADER = 6
+const MIN_LEADER = 3
+// A page reference at a line's end, after a space or a leader mark (not the end of a word).
+const PAGE_END = /(?:^|[\s.·∙…])(?:\d{1,4}|[ivxlcdm]{1,8})\s*$/
 
 const round = n => Math.round(n * 2) / 2
 
@@ -143,7 +146,7 @@ export function calibrate(samples) {
       seenOn.set(key, (seenOn.get(key) ?? 0) + 1)
     }
     const page = Array.isArray(sample) ? null : sample?.page
-    if (!Number.isInteger(page)) continue
+    if (!Number.isInteger(page) || page < 1) continue
     const found = new Set()
     const shown = lines.filter(line => cleanRun(line.text).trim() !== '')
     for (const line of new Set([shown[0], shown.at(-1)])) {
@@ -160,7 +163,8 @@ export function calibrate(samples) {
       folioOffset = offset
     }
   }
-  if (agree < 2 || agree * 2 < numbered || !saneOffset(folioOffset)) folioOffset = null
+  // At least three sampled pages, and more than half of those printing a number, agree: two "Total 15" lines do not.
+  if (agree < 3 || agree * 2 <= numbered || !saneOffset(folioOffset)) folioOffset = null
   let bodySize = 10
   let best = -1
   for (const [s, n] of sizes) {
@@ -184,13 +188,18 @@ export function calibrate(samples) {
 const MAX_FOLIO_OFFSET = 100000
 const saneOffset = n => Number.isInteger(n) && Math.abs(n) <= MAX_FOLIO_OFFSET
 
-/** The 1–4 digit numbers at either end of a short line: where a folio is printed. */
-function edgeNumbers(line) {
+/** A short line's words, ornaments around a folio dropped; none for a long or empty line. */
+function edgeWords(line) {
   if (!line) return []
   const text = cleanRun(line.text).trim()
   if (text === '' || text.length > RUNNING_MAX_CHARS) return []
-  const words = text.replace(/[|·•–—]/g, ' ').trim().split(/\s+/)
-  return [...new Set([words[0], words.at(-1)])].filter(w => FOLIO.test(w)).map(Number)
+  return text.replace(/[|·•–—]/g, ' ').trim().split(/\s+/)
+}
+
+/** The 1–4 digit numbers at either end of a short line: where a folio is printed. */
+function edgeNumbers(line) {
+  const words = edgeWords(line)
+  return [...new Set([words[0], words.at(-1)])].filter(w => w !== undefined && FOLIO.test(w)).map(Number)
 }
 
 function headerKey(line) {
@@ -238,7 +247,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
     else blocks.push({ kind: open.kind, runs: runsOf(open.items) })
     open = null
   }
-  const start = (kind, line, extra) => ({ kind, items: [...line.items], minX: line.x, right: line.right, size: line.size, rows: 1, ...extra })
+  const start = (kind, line, extra) => ({ kind, items: [...line.items], minX: line.x, right: line.right, size: line.size, rows: 1, pageEnd: line.pageEnd, ...extra })
   // Right above a contents line, at the page's start or after a heading or an entry: the first line of its title.
   const startsEntry = (line, next) => {
     if (line.toc || line.mono || !next?.toc) return false
@@ -269,7 +278,7 @@ export function pageBlocks(items, images, profile, { maxChars = MAX_PAGE_CHARS, 
       open.lines.push({ x: line.x, text })
     } else if (line.toc) {
       // A title that wrapped before its leader: the line or two just above, as wide as the entry, join it.
-      if (open?.titleFirst && open.rows <= 2 && wrapsInto({ x: open.minX, right: open.right, size: open.size }, line, gap)) {
+      if (open?.titleFirst && open.rows <= 2 && wrapsInto({ x: open.minX, right: open.right, size: open.size, pageEnd: open.pageEnd }, line, gap)) {
         joinLine(open, line)
         blocks.push(tocBlock(open.items, levelOf(open.minX)))
         open = null
@@ -347,6 +356,7 @@ function joinLine(open, line) {
   open.minX = Math.min(open.minX, line.x)
   open.right = line.right
   open.rows++
+  open.pageEnd = line.pageEnd
 }
 
 /** The page's usual distance between body lines (the most common one, seen three times or more), or null. */
@@ -386,11 +396,23 @@ function withoutRunning(lines, { top, bottom, pageNumber, body, folioOffset }) {
   const band = RUNNING_BAND * (top - bottom)
   const first = lines[0]
   const last = lines.at(-1)
-  const drop = new Set()
-  if (first && first.y >= top - band && isRunning(first, lines[1], 'top', body, folio)) drop.add(first)
-  if (last && last !== first && last.y <= bottom + band && isRunning(last, lines.at(-2), 'foot', body, folio)) drop.add(last)
-  return drop.size > 0 ? lines.filter(line => !drop.has(line)) : lines
+  const atTop = first && first.y >= top - band && isRunning(first, lines[1], 'top', body, folio)
+  const atFoot = last && last !== first && last.y <= bottom + band && isRunning(last, lines.at(-2), 'foot', body, folio)
+  // A page prints its folio once; a title may carry the same number ("Chapter 3", "1 Introduction" on page 1).
+  // Both edges: a bare number is the folio, else a bold or heading-sized top line is the title. Top only: a
+  // bold line is a numbered title, not a running head.
+  let drop = null
+  if (atTop && atFoot) drop = isBare(last) ? last : isBare(first) ? first : isBold(first) || first.size >= HEADING_RATIO * body ? last : first
+  else if (atTop) drop = isBold(first) ? null : first
+  else if (atFoot) drop = last
+  return drop ? lines.filter(line => line !== drop) : lines
 }
+
+/** A line of the folio alone ("57", "— 57 —"). */
+const isBare = line => edgeWords(line).length === 1
+
+/** Every word of the line set in a bold face. */
+const isBold = line => line.items.every(it => !it.text.trim() || (!it.mono && BOLD.test(it.font)))
 
 function isRunning(line, next, edge, body, folio) {
   const text = cleanRun(line.text).trim()
@@ -403,18 +425,21 @@ function isRunning(line, next, edge, body, folio) {
 // ---------------------------------------------------------------- contents lines
 
 /**
- * Marks each line's `toc` (title and page) when it is a contents line: a strong
- * leader on its own, a weak one only when another leader line on the page ends
- * at the same right edge (within 1 pt).
+ * Marks each line's `toc` (title and page) when it is a contents line: a leader
+ * of ALONE_LEADER on its own, a shorter one only when another leader line on the
+ * page ends at the same right edge (within 1 pt). Also marks `pageEnd`: the right
+ * edge of a line ending in a page reference, entry or not.
  */
 function markContents(lines) {
   const rights = new Map()
   for (const line of lines) {
-    line.toc = line.mono ? null : splitLeader(cleanRun(line.text))
+    const text = cleanRun(line.text)
+    line.toc = line.mono ? null : splitLeader(text)
+    line.pageEnd = !line.mono && PAGE_END.test(text) ? line.right : null
     if (line.toc) rights.set(Math.round(line.right), (rights.get(Math.round(line.right)) ?? 0) + 1)
   }
   for (const line of lines) {
-    if (!line.toc || line.toc.strength >= STRONG_LEADER) continue
+    if (!line.toc || line.toc.strength >= ALONE_LEADER) continue
     const r = Math.round(line.right)
     const beside = (rights.get(r - 1) ?? 0) + (rights.get(r) ?? 0) + (rights.get(r + 1) ?? 0) - 1
     if (beside < 1) line.toc = null
@@ -424,7 +449,7 @@ function markContents(lines) {
 /**
  * A contents line's title (untrimmed, from the line's start), page and leader
  * strength (dots, an ellipsis as three), or null when the leader is weaker than
- * WEAK_LEADER. Read back from the line's end, so a hostile line of dots costs
+ * MIN_LEADER. Read back from the line's end, so a hostile line of dots costs
  * linear time.
  */
 function splitLeader(text) {
@@ -437,14 +462,19 @@ function splitLeader(text) {
     if (LEADER_MARK.test(c)) strength += c === '…' ? 3 : 1
     else if (!/\s/.test(c)) break
   }
-  if (strength < WEAK_LEADER) return null
+  if (strength < MIN_LEADER) return null
   const title = text.slice(0, i + 1)
   return /\S/.test(title) ? { title, page: page[1].replace(/ /g, ''), strength } : null
 }
 
-/** A title's first line runs on into the contents line below it: close above, not right of it, as large, about as wide. */
+/**
+ * A title's first line runs on into the contents line below it: close above, not
+ * right of it, as large, about as wide, and not itself ending in a page at the
+ * entry's right edge (then it is an entry of its own, whatever its leader).
+ */
 function wrapsInto(first, entry, gap) {
   return (
+    (first.pageEnd == null || Math.abs(first.pageEnd - entry.right) > 1) &&
     gap <= 1.5 * 1.2 * entry.size &&
     entry.x >= first.x - 1 &&
     Math.abs(first.size - entry.size) < 0.5 &&
