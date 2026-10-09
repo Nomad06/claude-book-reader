@@ -27,6 +27,15 @@ import {
   noPickerReason,
   notification,
 } from './platform.mjs'
+import { nodeVersionProblem } from './node-version.mjs'
+
+// Before anything else: pdf.js (text mode) needs a recent node. The mod shows
+// this line when the server fails to start.
+const nodeProblem = nodeVersionProblem()
+if (nodeProblem) {
+  console.error(nodeProblem)
+  process.exit(1)
+}
 
 const APP = 'book-reader'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')

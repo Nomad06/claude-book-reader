@@ -188,7 +188,7 @@ async function findNode($: EngineInterface): Promise<string> {
   if (cfg.nodePath) return cfg.nodePath
   if (live.nodePath) return live.nodePath
   const found = (await isWindows($)) ? await findNodeOnWindows($) : await findNodeOnUnix($)
-  if (!found) throw new Error('node was not found; install Node.js 18 or newer, or set "Path to node" for book-reader in /config')
+  if (!found) throw new Error('node was not found; install Node.js 22.13 or newer, or set "Path to node" for book-reader in /config')
   live.nodePath = found
   return found
 }

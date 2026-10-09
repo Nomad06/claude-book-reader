@@ -1,5 +1,5 @@
 #!/bin/sh
-# Re-vendors pdf.js (the pdfjs-dist package) into viewer/vendor/pdfjs.
+# Re-vendors pdf.js (the pdfjs-dist package, its legacy build: it also runs in Node) into viewer/vendor/pdfjs.
 #
 #   scripts/update-pdfjs.sh            the version in viewer/vendor/pdfjs/VERSION
 #   scripts/update-pdfjs.sh 6.5.0      another version
@@ -21,8 +21,8 @@ SRC="$WORK/package"
 
 rm -rf "$DEST"
 mkdir -p "$DEST/build" "$DEST/web"
-cp "$SRC/build/pdf.min.mjs" "$SRC/build/pdf.worker.min.mjs" "$DEST/build/"
-cp "$SRC/web/pdf_viewer.mjs" "$SRC/web/pdf_viewer.css" "$DEST/web/"
+cp "$SRC/legacy/build/pdf.min.mjs" "$SRC/legacy/build/pdf.worker.min.mjs" "$DEST/build/"
+cp "$SRC/legacy/web/pdf_viewer.mjs" "$SRC/legacy/web/pdf_viewer.css" "$DEST/web/"
 cp -R "$SRC/web/images" "$DEST/web/"
 cp -R "$SRC/cmaps" "$SRC/standard_fonts" "$SRC/wasm" "$SRC/iccs" "$DEST/"
 cp "$SRC/LICENSE" "$DEST/"

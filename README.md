@@ -42,7 +42,7 @@ the reader tells you and asks whether to close the book or keep reading.
 | | |
 | --- | --- |
 | Claude Code | 2.1.288 or newer (terminal or the desktop app's Code tab). Mods built on function hooks are an early-access Claude Code feature and can change between releases. |
-| Node.js | 18 or newer. The mod looks on your `PATH`, in your login shell and in the usual install folders (Homebrew, nvm, fnm, Volta, asdf, mise; `Program Files` and nvm-windows on Windows). Or set **Path to node** in `/config`. |
+| Node.js | 22.13 or newer. The mod looks on your `PATH`, in your login shell and in the usual install folders (Homebrew, nvm, fnm, Volta, asdf, mise; `Program Files` and nvm-windows on Windows). Or set **Path to node** in `/config`. |
 | OS | macOS, Linux or Windows 10/11. |
 | Browser | Any modern browser. With Chrome, Edge, Brave, Chromium or Vivaldi installed, the book opens in its own window without tabs or an address bar (Windows always has Edge). |
 

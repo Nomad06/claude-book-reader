@@ -6,11 +6,11 @@
   "license": "Apache-2.0",
   "repository": "github:Nomad06/claude-book-reader",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "scripts": {
-    "test": "node --test test/platform.test.mjs test/server.test.mjs && claude plugin test .",
-    "test:server": "node --test test/platform.test.mjs test/server.test.mjs",
+    "test": "node --test \"test/*.test.mjs\" && claude plugin test .",
+    "test:server": "node --test \"test/*.test.mjs\"",
     "test:mod": "claude plugin test .",
     "validate": "claude plugin validate .",
     "update-pdfjs": "sh scripts/update-pdfjs.sh"

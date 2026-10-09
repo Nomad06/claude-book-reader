@@ -16,13 +16,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [20, 22]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: node --test test/platform.test.mjs test/server.test.mjs
+      - run: node --test "test/*.test.mjs"
 
   mod:
     name: Mod (claude plugin validate + test, ${{ matrix.os }})
