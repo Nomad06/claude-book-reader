@@ -3,7 +3,7 @@ import type { On } from 'claude-code'
 
 import type { Block, Run } from '../types'
 import { ACCENT_FROM, ACCENT_TO, CURRENT, GREEN, bar, dockModel, gradient, noBookLine, percent, phaseWord, spaced } from './dock-logic.ts'
-import { fitTitle, imageBox, imageLine, pageLabel, splitUrls, textWidth, tocRows } from './reader-logic.ts'
+import { drawingLine, fitTitle, imageBox, imageLine, pageLabel, splitUrls, textWidth, tocRows } from './reader-logic.ts'
 
 // The reader view of the Reading Dock: one page of the book as text, drawn
 // from the page register.tsx fetched. Presses that reach the server (page
@@ -178,6 +178,8 @@ export function registerReader(on: On): void {
           }
           return <Text dimColor>{imageLine(b.alt, b.width, b.height)}</Text>
         }
+        case 'drawing':
+          return <Text dimColor>{drawingLine(b.alt)}</Text>
       }
     }
 

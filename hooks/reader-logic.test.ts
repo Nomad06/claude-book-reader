@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { fitTitle, imageBox, imageLine, isGraphicsTerminal, listText, pageLabel, parseGoto, readerMode, splitUrls, textWidth, tocRows } from './reader-logic.ts'
+import { drawingLine, fitTitle, imageBox, imageLine, isGraphicsTerminal, listText, pageLabel, parseGoto, readerMode, splitUrls, textWidth, tocRows } from './reader-logic.ts'
 
 describe('reader logic', () => {
   test('kitty and Ghostty draw pictures; others do not', () => {
@@ -40,6 +40,7 @@ describe('reader logic', () => {
     expect(pageLabel(3, null, false)).toBe('p. 3')
     expect(imageLine('Figure 1-12. Both under one roof', 1980, 1055)).toBe('▣ Figure 1-12. Both under one roof · 1980×1055 · o opens in browser')
     expect(imageLine('Image 800×450', 800, 450)).toBe('▣ Image 800×450 · o opens in browser')
+    expect(drawingLine('Рис. 1.1. Пример того, как GPT-4 токенизирует фразу')).toBe('▣ Рис. 1.1. Пример того, как GPT-4 токенизирует фразу · drawing · o opens in browser')
     expect(listText([{ text: '• ' }, { text: 'bold', bold: true }, { text: ' item' }])).toBe('• bold item')
   })
 })

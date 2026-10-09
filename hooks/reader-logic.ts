@@ -43,6 +43,11 @@ export function imageLine(alt: string, width: number, height: number): string {
   return `▣ ${label} · o opens in browser`
 }
 
+/** The one-line stand-in for a figure drawn with paths that the server did not render. */
+export function drawingLine(alt: string): string {
+  return `▣ ${alt} · drawing · o opens in browser`
+}
+
 export function listText(runs: Run[]): string {
   return runs.map(run => run.text).join('')
 }

@@ -39,6 +39,24 @@ describe('reader view', () => {
     }
   })
 
+  test('a figure drawn with paths that the server could not render is one line, with or without graphics', async ($, on) => {
+    const blocks: Block[] = [
+      { kind: 'drawing', alt: 'Рис. 1.1. Пример' },
+      { kind: 'caption', runs: [{ text: 'Рис. 1.1. Пример' }] },
+    ]
+    const reader: Reader = { viewers: 0, hasBook: true, mode: 'text', pages: { 42: { blocks } } }
+    const { clock } = world(on, reader, { placesPanes: true, env: { TERM_PROGRAM: 'ghostty' } })
+    await $.session.start({ cwd: '/home/me/project', surface: 'terminal', isInteractive: true })
+    await $.turn.start({ text: 'build', turnId: 't1' })
+    await clock.advance(5_000)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await mountDock($, surface)
+      expect((await ui.find({ type: 'Text', text: /^▣ Рис\. 1\.1\. Пример · drawing · o opens in browser$/ }))?.props).toMatchObject({ dimColor: true })
+      expect(await ui.find({ type: 'Image' })).toBeUndefined()
+      await ui.unmount()
+    }
+  })
+
   test('a heading is plain bold in the accent colour at every level, never spaced', async ($, on) => {
     const blocks: Block[] = [
       { kind: 'heading', level: 1, runs: [{ text: 'Глава один', bold: true }] },
