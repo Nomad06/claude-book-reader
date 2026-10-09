@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url'
 export const MAX_IMAGE_WIDTH = 800
 export const MAX_IMAGE_HEIGHT = 4096 // the terminal engine's Image limit
 export const MAX_IMAGE_FILES = 200
+export const MAX_PAGE_IMAGES = 40 // pictures written for one page: a page never sweeps its own files
 const MIN_IMAGE_SIDE = 24
 const MAX_OUTLINE = 2000
 
@@ -219,6 +220,7 @@ async function imagesOf(pdf, page, ops, prefix, imagesDir) {
   }
   const images = []
   for (const [k, hit] of found.entries()) {
+    if (images.length >= MAX_PAGE_IMAGES) break
     const img =
       typeof hit.source === 'string' ? await new Promise(resolve => page.objs.get(hit.source, resolve)).catch(() => null) : hit.source
     if (!img || !img.data || img.width < MIN_IMAGE_SIDE || img.height < MIN_IMAGE_SIDE) continue

@@ -87,7 +87,7 @@ export function buildPdf(pages, { width = 612, height = 792 } = {}) {
 }
 
 /** A one-page PDF whose only content is a mid-gray RGB image covering the page. */
-export function buildScannedPdf({ width = 612, height = 792, pixels = 32 } = {}) {
+export function buildScannedPdf({ width = 612, height = 792, pixels = 32, copies = 1 } = {}) {
   const objects = []
   const add = body => (objects.push(body), objects.length)
   const catalogId = add('')
@@ -96,7 +96,7 @@ export function buildScannedPdf({ width = 612, height = 792, pixels = 32 } = {})
   const imageId = add(
     `<< /Type /XObject /Subtype /Image /Width ${pixels} /Height ${pixels} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length ${raw.length} >>\nstream\n${raw.toString('latin1')}\nendstream`,
   )
-  const stream = `q ${width} 0 0 ${height} 0 0 cm /Im1 Do Q`
+  const stream = Array.from({ length: copies }, () => `q ${width} 0 0 ${height} 0 0 cm /Im1 Do Q`).join('\n')
   const contentId = add(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)
   const pageId = add(
     `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im1 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`,

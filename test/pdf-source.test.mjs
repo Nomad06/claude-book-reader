@@ -9,8 +9,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, createPdfSource, downscale, sweepImages, toRgb } from '../server/pdf-source.mjs'
-import { cleanRun, plainText } from '../server/text.mjs'
+import { MAX_IMAGE_HEIGHT, MAX_PAGE_IMAGES, MAX_IMAGE_WIDTH, createPdfSource, downscale, sweepImages, toRgb } from '../server/pdf-source.mjs'
+import { cleanRun, errorLine, plainText } from '../server/text.mjs'
+import { shared } from '../server/shared.mjs'
 import { TEXT, buildPdf, buildScannedPdf } from './pdf-fixture.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -173,5 +174,43 @@ describe('images', () => {
     assert.deepEqual((await fs.readdir(sweep)).sort(), ['2.rgb', '3.rgb'])
     await sweepImages(sweep, 0)
     assert.deepEqual(await fs.readdir(sweep), [])
+  })
+})
+
+describe('bounds', () => {
+  test('a page with many pictures writes at most MAX_PAGE_IMAGES files', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'book-reader-many-'))
+    try {
+      const file = path.join(dir, 'many.pdf')
+      await fs.writeFile(file, buildScannedPdf({ copies: MAX_PAGE_IMAGES + 20 }))
+      const source = createPdfSource({ vendorDir: VENDOR, imagesDir: path.join(dir, 'images') })
+      try {
+        const content = await (await source.open({ id: 'many', path: file })).pageContent(1)
+        assert.equal(content.images.length, MAX_PAGE_IMAGES)
+        assert.equal((await fs.readdir(path.join(dir, 'images'))).length, MAX_PAGE_IMAGES)
+      } finally {
+        await source.closeAll()
+      }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('concurrent callers of one key share one run', async () => {
+    const map = new Map()
+    let runs = 0
+    const work = async () => (runs++, await new Promise(r => setTimeout(r, 20)), 'done')
+    const all = await Promise.all([shared(map, 'a', work), shared(map, 'a', work), shared(map, 'a', work)])
+    assert.deepEqual(all, ['done', 'done', 'done'])
+    assert.equal(runs, 1)
+    assert.equal(map.size, 0)
+    await shared(map, 'a', work)
+    assert.equal(runs, 2)
+  })
+
+  test('an error message is one short plain line', () => {
+    const line = errorLine(new Error('bad \u001b[2J\nbytes ' + 'x'.repeat(1000)))
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(line))
+    assert.equal(line.length, 300)
   })
 })

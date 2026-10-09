@@ -524,6 +524,13 @@ describe('text mode', () => {
     assert.ok(await fs.stat(second.json.blocks[0].file).catch(() => null))
   })
 
+  test('many requests at once for one page all get the same answer', async () => {
+    const id = await addRealPdf('burst.pdf', buildPdf(TEXT))
+    const all = await Promise.all(Array.from({ length: 12 }, () => request('GET', `/api/books/${id}/page/1`)))
+    assert.ok(all.every(r => r.status === 200))
+    assert.ok(all.every(r => JSON.stringify(r.json) === JSON.stringify(all[0].json)))
+  })
+
   test('an outline title from the PDF loses its control characters', async () => {
     const id = await addRealPdf('esc-outline.pdf', buildPdf([{ outline: 'Red\u001b[31m Chapter', lines: [{ text: 'Body text here.' }] }]))
     assert.equal((await request('GET', `/api/books/${id}/page/1`)).status, 200)

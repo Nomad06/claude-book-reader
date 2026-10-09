@@ -19,3 +19,8 @@ export function cleanRun(text) {
 export function clampLevels(list, max = 9) {
   return list.map(entry => ({ ...entry, level: Math.min(entry.level, max) }))
 }
+
+/** An error's message as one short plain line: pdf.js messages can carry bytes of the PDF. */
+export function errorLine(error, max = 300) {
+  return plainText(String(error?.message ?? error)).slice(0, max)
+}

@@ -28,7 +28,8 @@ import {
   notification,
 } from './platform.mjs'
 import { nodeVersionProblem } from './node-version.mjs'
-import { clampLevels, plainText } from './text.mjs'
+import { clampLevels, errorLine, plainText } from './text.mjs'
+import { shared } from './shared.mjs'
 import { createPdfSource, sweepImages } from './pdf-source.mjs'
 import { calibrate, pageBlocks } from './page-blocks.mjs'
 
@@ -556,15 +557,43 @@ function cleanOutline(body, pages) {
 
 // One page as blocks. The first page of a book also fills what the browser
 // viewer would have reported (page count, contents) and calibrates the book.
+// Work for one book or page runs once at a time: concurrent requests share it.
+const filling = new Map() // bookId -> Promise
+const extracting = new Map() // `${bookId}:${page}` -> Promise
+
 async function pageOf(book, n) {
   if (!fs.existsSync(book.path)) throw httpError(404, 'file missing')
   let doc
   try {
     doc = await source.open(book)
   } catch (error) {
-    throw httpError(422, `cannot open the PDF: ${error.message}`)
+    throw httpError(422, `cannot open the PDF: ${errorLine(error)}`)
   }
   if (!Number.isInteger(n) || n < 1 || n > doc.pages) throw httpError(404, `no page ${n}; the book has ${doc.pages}`)
+  await shared(filling, book.id, () => fillBook(book, doc))
+
+  const key = `${book.id}:${n}`
+  const cached = pageCache.get(key)
+  // pdf.js's image sweep may have removed a cached page's pictures; such an answer is extracted again.
+  if (cached && cached.blocks.every(block => block.kind !== 'image' || fs.existsSync(block.file))) return cached
+  return shared(extracting, key, async () => {
+    let answer
+    try {
+      const { items, images, width, height } = await doc.pageContent(n)
+      const blocks = pageBlocks(items, images, book.textProfile)
+      const scanned = items.every(item => !item.text.trim()) && images.some(img => img.w * img.h >= 0.5 * width * height)
+      answer = { page: n, pages: doc.pages, blocks, scanned }
+    } catch (error) {
+      answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: errorLine(error) }
+    }
+    pageCache.set(key, answer)
+    if (pageCache.size > PAGE_CACHE_MAX) pageCache.delete(pageCache.keys().next().value)
+    return answer
+  })
+}
+
+// Each part is tried once per book: a failure stores the empty answer instead of retrying on every request.
+async function fillBook(book, doc) {
   let changed = false
   if (!book.pages) {
     book.pages = doc.pages
@@ -579,31 +608,17 @@ async function pageOf(book, n) {
     changed = true
   }
   if (!book.textProfile) {
+    let profile
     try {
-      book.textProfile = calibrate(await doc.samples(12))
+      profile = calibrate(await doc.samples(12))
     } catch {
-      book.textProfile = calibrate([])
+      profile = calibrate([])
     }
+    // Header lines come from the PDF's text: plain, short.
+    book.textProfile = { ...profile, headers: profile.headers.map(h => ({ ...h, text: plainText(h.text).slice(0, 200) })) }
     changed = true
   }
   if (changed) scheduleSave()
-
-  const key = `${book.id}:${n}`
-  const cached = pageCache.get(key)
-  // pdf.js's image sweep may have removed a cached page's pictures; such an answer is extracted again.
-  if (cached && cached.blocks.every(block => block.kind !== 'image' || fs.existsSync(block.file))) return cached
-  let answer
-  try {
-    const { items, images, width, height } = await doc.pageContent(n)
-    const blocks = pageBlocks(items, images, book.textProfile)
-    const scanned = items.every(item => !item.text.trim()) && images.some(img => img.w * img.h >= 0.5 * width * height)
-    answer = { page: n, pages: doc.pages, blocks, scanned }
-  } catch (error) {
-    answer = { page: n, pages: doc.pages, blocks: [], scanned: false, error: plainText(String(error?.message ?? error)).slice(0, 300) }
-  }
-  pageCache.set(key, answer)
-  if (pageCache.size > PAGE_CACHE_MAX) pageCache.delete(pageCache.keys().next().value)
-  return answer
 }
 
 async function route(req, res) {
