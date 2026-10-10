@@ -21,6 +21,15 @@ let book
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+/** Waits until `check()` is true (it may be async), asking every 25 ms; fails after `ms` (slow CI runners get room). */
+async function until(check, what, ms = 15_000) {
+  const end = Date.now() + ms
+  while (!(await check())) {
+    if (Date.now() > end) throw new Error(`timed out waiting: ${what}`)
+    await sleep(25)
+  }
+}
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const probe = net.createServer()
@@ -61,13 +70,13 @@ async function startServer(script) {
     })
     return { status: res.status, json: await res.json() }
   }
-  for (let i = 0; i < 100; i++) {
+  await until(async () => {
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/health`)
-      if (res.ok) break
-    } catch {}
-    await sleep(50)
-  }
+      return (await fetch(`http://127.0.0.1:${port}/api/health`)).ok
+    } catch {
+      return false
+    }
+  }, 'the server to answer')
   const exited = new Promise(resolve => child.once('exit', resolve))
   const stop = async () => {
     if (child.exitCode === null) child.kill()
@@ -104,7 +113,7 @@ describe('choosing a book with the file dialog', () => {
       assert.equal(first.status, 200)
       assert.equal(first.json.pending, true)
       assert.equal(typeof first.json.id, 'string')
-      const second = await server.post('/api/choose', { waitMs: 5_000, id: first.json.id })
+      const second = await server.post('/api/choose', { waitMs: 20_000, id: first.json.id })
       assert.equal(second.json.book.path, book)
     } finally {
       await server.stop()
@@ -115,7 +124,9 @@ describe('choosing a book with the file dialog', () => {
     const server = await startServer(await pickerScript('quick-cancel', { delayMs: 100 }))
     try {
       const abandoned = await server.post('/api/choose', { waitMs: 10 })
-      await sleep(400) // the abandoned dialog is cancelled meanwhile
+      assert.equal(abandoned.json.pending, true)
+      // Its dialog is cancelled meanwhile: wait until the server has its outcome.
+      await until(async () => !(await server.post('/api/choose', { waitMs: 10, id: abandoned.json.id })).json.pending, 'the first dialog to settle')
       const fresh = await server.post('/api/choose', { waitMs: 10 })
       assert.equal(fresh.json.pending, true)
       assert.notEqual(fresh.json.id, abandoned.json.id)
@@ -141,15 +152,11 @@ describe('choosing a book with the file dialog', () => {
     try {
       assert.equal((await server.post('/api/choose', { waitMs: 10 })).json.pending, true)
       let pid = 0
-      for (let i = 0; i < 100 && !pid; i++) {
-        pid = Number(await fs.readFile(pidFile, 'utf8').catch(() => '0'))
-        if (!pid) await sleep(20)
-      }
-      assert.ok(pid > 0 && isRunning(pid))
+      await until(async () => (pid = Number(await fs.readFile(pidFile, 'utf8').catch(() => '0'))) > 0, 'the dialog to start')
+      assert.ok(isRunning(pid))
       await server.post('/api/shutdown')
       await server.exited
-      for (let i = 0; i < 100 && isRunning(pid); i++) await sleep(20)
-      assert.equal(isRunning(pid), false)
+      await until(() => !isRunning(pid), 'the dialog to end')
     } finally {
       await server.stop()
     }
