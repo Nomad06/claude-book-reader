@@ -10,18 +10,32 @@ permissions:
 
 jobs:
   server:
-    name: Reader server (Node ${{ matrix.node }}, ${{ matrix.os }})
+    name: Reader server (Node ${{ matrix.node }}, ${{ matrix.os }}${{ matrix.canvas && ', canvas' || '' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: [22, 24]
+        # These two also install the optional @napi-rs/canvas, so the figure
+        # tests run; elsewhere they are skipped, as in a marketplace install.
+        include:
+          - os: ubuntu-latest
+            node: 22
+            canvas: true
+          - os: macos-latest
+            node: 22
+            canvas: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - if: matrix.canvas
+        run: npm ci
+      - if: matrix.canvas
+        name: Check that @napi-rs/canvas loads
+        run: node -e "require('@napi-rs/canvas')"
       - run: node --test "test/*.test.mjs"
 
   mod:

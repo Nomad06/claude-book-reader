@@ -2,9 +2,15 @@
   "name": "claude-book-reader",
   "version": "0.2.0",
   "private": true,
-  "description": "A Claude Code mod that opens your PDF book while Claude works.",
+  "description": "A Claude Code mod that opens your PDF book while Claude works, in a window of its own or as text in the terminal.",
   "license": "Apache-2.0",
-  "repository": "github:Nomad06/claude-book-reader",
+  "author": "Nomad06 (https://github.com/Nomad06)",
+  "homepage": "https://github.com/Nomad06/claude-book-reader#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nomad06/claude-book-reader.git"
+  },
+  "bugs": "https://github.com/Nomad06/claude-book-reader/issues",
   "engines": {
     "node": ">=22.13.0"
   },

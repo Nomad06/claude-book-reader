@@ -1,8 +1,9 @@
 # Book Reader for Claude Code
 
 Read a book while Claude works. When a task runs for more than a few seconds,
-your PDF opens by itself at the exact place you stopped. When the task is done,
-the reader tells you and asks whether to close the book or keep reading.
+your PDF opens by itself at the exact place you stopped: in a browser window of
+its own, or as text right in the terminal. When the task is done, the reader
+tells you and asks whether to close the book or keep reading.
 
 ![The reader: contents with read chapters ticked, page progress and the task status](docs/reader.jpg)
 
@@ -31,13 +32,16 @@ the reader tells you and asks whether to close the book or keep reading.
 - **A Reading Dock in the terminal.** In a wide fullscreen terminal, a pane
   beside the transcript shows the book's progress, a strip of the pages you
   have read, the chapters with ticks, and the running task with a timer. Press
-  a chapter to jump there, `l` for your library, `o` to raise the reader. When
-  the task ends it says how long it took and how many pages you read meanwhile.
-  `/book dock` folds it to the status line and back.
+  a chapter to jump there, `l` for your library, `o` to open the reader (or
+  raise its window when it is already open). When the task ends it says how
+  long it took and how many pages you read meanwhile. `/book dock` folds it to
+  the status line and back.
 - **Text mode: read inside the terminal.** `/book mode text` and the book opens
-  as text in the Reading Dock instead of a browser window: headings, paragraphs,
-  lists and code blocks, one page at a time (`n` / `p`, `g` to go to a page),
-  pictures on kitty and Ghostty, a one-line placeholder elsewhere. `o` opens the
+  as text in the Reading Dock instead of a browser window, one page at a time
+  (`n` / `p`, `g` to go to a page): headings, paragraphs with the book's
+  indents, lists, code blocks, and contents pages with their page numbers;
+  running heads and page numbers are left out. Pictures on kitty and Ghostty,
+  a one-line placeholder elsewhere (see [Text mode](#text-mode)). `o` opens the
   browser at the same page any time, for tables, figures or a scanned page.
   The desktop app's Code tab reads this way too.
 - **Local and offline.** PDF.js is bundled, the reader server listens on
@@ -50,7 +54,8 @@ the reader tells you and asks whether to close the book or keep reading.
 | Claude Code | 2.1.288 or newer (terminal or the desktop app's Code tab). Mods built on function hooks are an early-access Claude Code feature and can change between releases. |
 | Node.js | 22.13 or newer. The mod looks on your `PATH`, in your login shell and in the usual install folders (Homebrew, nvm, fnm, Volta, asdf, mise; `Program Files` and nvm-windows on Windows). Or set **Path to node** in `/config`. |
 | OS | macOS, Linux or Windows 10/11. |
-| Browser | Any modern browser. With Chrome, Edge, Brave, Chromium or Vivaldi installed, the book opens in its own window without tabs or an address bar (Windows always has Edge). |
+| Browser | Any modern browser (optional in text mode). With Chrome, Edge, Brave, Chromium or Vivaldi installed, the book opens in its own window without tabs or an address bar (Windows always has Edge). |
+| Terminal | Any, for text mode. Pictures need **kitty** or **Ghostty**; other terminals (macOS Terminal, iTerm2, Windows Terminal, VS Code…) show a one-line placeholder for each picture. |
 
 What each OS uses:
 
@@ -92,7 +97,31 @@ options are not yet set", that's fine: every setting has a default (see
 [Settings](#settings)).
 
 To update later: `claude plugin marketplace update claude-book-reader`, then
-`claude plugin update book-reader@claude-book-reader`.
+`claude plugin update book-reader@claude-book-reader`. The first `/book` (or
+task) after an update replaces the reader server of the older version.
+
+### Optional: figures drawn as pictures in text mode
+
+Some figures in a PDF are not pictures but drawings (lines, curves, shapes).
+Text mode can render them as pictures with
+[`@napi-rs/canvas`](https://www.npmjs.com/package/@napi-rs/canvas), an optional
+native module of about 27 MB. A plugin installed from the marketplace comes
+without it; each such figure is then one line,
+`▣ <caption> · drawing · o opens in browser`.
+
+To turn it on, run `npm install` in the plugin's folder, then `/book restart`.
+Claude Code keeps an installed plugin in
+`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, so for this one:
+
+```bash
+cd ~/.claude/plugins/cache/claude-book-reader/book-reader/0.2.0
+npm install
+```
+
+(on Windows, `%USERPROFILE%\.claude\plugins\cache\claude-book-reader\book-reader\0.2.0`).
+An update installs into a new version folder: run `npm install` there again.
+For a clone loaded with `--plugin-dir`, run `npm install` in the clone. It only
+shows where pictures are drawn (kitty, Ghostty).
 
 ### From a clone
 
@@ -148,8 +177,42 @@ Pick a book once, then just work:
 | `/book open browser` | Open the browser window at the current page, whatever the mode |
 | `/book auto on` / `off` | Open the book by itself while a task runs, or not |
 | `/book delay <seconds>` | How long a task must run before the book opens (`0`: at once) |
-| `/book status` | What is set up |
+| `/book status` | What is set up, and why the reader server last failed to start |
 | `/book restart` | Restart the reader server (books and places are kept) |
+| `/book help` | The list of commands (also `--help`, `-h`) |
+
+`/book choose` waits while the file dialog is open, up to ten minutes.
+
+### Browser mode and text mode
+
+| | Browser mode (default) | Text mode |
+| --- | --- | --- |
+| Where the book opens | A window of its own (or a tab, see [Settings](#settings)) | The Reading Dock |
+| What you see | The PDF itself, every page as printed | The page's text, laid out for the terminal |
+| A page counts as read | After it filled most of the window for 6 seconds | After it was on screen in the dock for 6 seconds |
+| When a task finishes | A dialog in the reader, a desktop notification and the band above the prompt | A box in the dock |
+
+Switch with `/book mode text` or `/book mode browser` (or **Reading mode** in
+`/config`). `/book open browser`, and `o` in the dock, open the browser at the
+current page in either mode.
+
+### Text mode
+
+- One page at a time, from the PDF's own text: headings, paragraphs (indents
+  kept), lists, code blocks and contents pages. Running heads and page numbers
+  are left out.
+- **Pictures** are drawn in **kitty** and **Ghostty**. macOS Terminal, iTerm2
+  and other terminals show a one-line placeholder for each,
+  `▣ <caption> · <size> · o opens in browser`; `o` shows the page in the
+  browser.
+- **Figures drawn with lines** rather than stored as pictures need the
+  optional canvas module: see
+  [above](#optional-figures-drawn-as-pictures-in-text-mode).
+- A scanned page has no text: kitty and Ghostty show its picture, other
+  terminals say so; `o` opens it in the browser.
+- The dock opens by itself (when a task runs) from 144 terminal columns.
+  `/book dock` opens it at any width: beside the transcript in the fullscreen
+  layout from 110 columns, else above the prompt.
 
 ### Reader keys
 
@@ -170,19 +233,27 @@ Pick a book once, then just work:
 
 When a task finishes, `Esc` keeps reading and `C` closes the book.
 
-### Reader keys in text mode
+### Reading Dock keys
 
-With the Reading Dock focused:
+With the Reading Dock focused, on its dashboard:
+
+| Key | |
+| --- | --- |
+| `o` | Open the reader (in browser mode, raises its window when it is already open) |
+| `r` | In text mode: read here, at your saved page |
+| `l` | Your library; `b` goes back |
+| a chapter | Jump there |
+
+In the text reader:
 
 | Key | |
 | --- | --- |
 | `n` / `p` | Next / previous page |
 | `g` | Go to page: focuses the "page" field; type a number and press Enter |
 | `m` | Mark the page read or unread |
-| `o` | Open the browser at this page |
+| `o` | Open the browser at this page (raises its window when it is already open) |
 | `d` | Back to the dashboard |
 | `l` | Your library |
-| `r` | From the dashboard (in text mode): read here, back to the page |
 
 When a task finishes, the done box appears in the reader: `c` closes the book
 (the pane returns to the dashboard), `k` keeps reading.
@@ -207,8 +278,9 @@ In `/config` (or `/plugin configure book-reader@claude-book-reader`):
 
 ```
 Claude Code ──hooks──▶ book-reader mod ──HTTP──▶ reader server (Node, 127.0.0.1:47321)
-                       (hooks/register.tsx)       (server/server.mjs)
-                                                         │  serves PDF.js + your PDF
+                       (hooks/*.tsx)              (server/server.mjs)
+                       Reading Dock, text mode           │  serves PDF.js + your PDF
+                                                         │  turns pages into text (PDF.js in Node)
                                                          │  pushes task events (SSE)
                                                          ▼
                                                   reader window (viewer/)
@@ -217,16 +289,45 @@ Claude Code ──hooks──▶ book-reader mod ──HTTP──▶ reader serv
 - The **mod** hooks the start and end of each of Claude's turns. When a turn
   runs past the delay, it starts the reader server if needed and asks it to
   show the book. When the turn ends, it tells the server, which tells the
-  reader, and shows the band above the prompt.
+  reader, and shows the band above the prompt. It also draws the Reading Dock
+  and, in text mode, the page.
 - The **reader server** keeps your library and progress in
-  `~/.claude/book-reader/state.json`, serves the reader page and your PDF, and
-  pushes task events to the open reader. It stops by itself after 6 hours
-  without use. One server is shared by all your Claude Code sessions; a server
-  left over from another version of the mod is replaced automatically.
+  `~/.claude/book-reader/state.json`, serves the reader page and your PDF,
+  turns pages into text for text mode, and pushes task events to the open
+  reader. It stops by itself after 6 hours without use. One server is shared by
+  all your Claude Code sessions; a server of an older version of the mod is
+  replaced automatically, a newer one is kept.
 - The **reader** is a PDF.js viewer that reports your place and read pages back
   to the server.
 
-Security details are in [SECURITY.md](SECURITY.md).
+## Privacy
+
+Everything runs on your machine. The reader server listens on `127.0.0.1`
+only, and the mod talks to it and to nothing else. Your library, places and
+read pages stay in `~/.claude/book-reader/` (`%USERPROFILE%\.claude\book-reader\`
+on Windows), with the pictures text mode extracted, the reader window's
+browser profile and the server's log. No telemetry and no network requests of
+its own. What it runs on your machine, and why, is in [SECURITY.md](SECURITY.md).
+
+## Troubleshooting
+
+- **Something is off:** `/book status` says which book and mode, whether the
+  reader server runs, and why it last failed to start. `/book restart` starts
+  the server again; your books and places are kept. The server's log is
+  `~/.claude/book-reader/server.log`.
+- **"book-reader needs Node 22.13 or newer; found v…"**: install a newer
+  Node.js, or point **Path to node** in `/config` at one.
+- **"node was not found"**: install Node.js 22.13 or newer, or set **Path to
+  node** in `/config`.
+- **"port 47321 is taken by another program"**: pick another **Reader server
+  port** in `/config`.
+- **"no browser could be opened"**: open the address it gives by hand.
+- **Pictures are one line in text mode**: the terminal is not kitty or
+  Ghostty; `o` opens the page in the browser.
+- **A figure says "drawing"**: install the optional canvas module, see
+  [above](#optional-figures-drawn-as-pictures-in-text-mode).
+- **The dock does not open by itself**: the terminal is under 144 columns;
+  `/book dock` opens it at any width.
 
 ## Limitations
 
@@ -242,7 +343,8 @@ Security details are in [SECURITY.md](SECURITY.md).
   Claude Code may change between releases.
 - Text mode reads the PDF's own text: scanned books have none (use `o` for the
   browser), two-column layouts and tables come out as plain paragraphs, and
-  mathematics is not laid out.
+  mathematics is not laid out. Each page has caps on its work (text, pictures,
+  figures and time), so a very heavy page shows less; `o` shows all of it.
 - A browser only lets a page close windows it opened itself; when it refuses,
   the reader shows "Bookmarked" and you close the window yourself.
 
@@ -256,7 +358,8 @@ hooks/dock.tsx, hooks/reader.tsx  the Reading Dock: dashboard and the text reade
 hooks/*-logic.ts                  their pure helpers (unit-tested)
 hooks/*.test.tsx                  the mod's tests (claude plugin test)
 types/index.d.ts                  the mod's state contract
-server/server.mjs                 the reader server, no dependencies
+server/server.mjs                 the reader server (optional dependency: @napi-rs/canvas)
+server/shared.mjs, server/text.mjs  small helpers (unit-tested)
 server/platform.mjs               what it runs on macOS, Linux and Windows (pure, unit-tested)
 server/pdf-source.mjs             opens a PDF with PDF.js in Node: text items, images, outline
 server/page-blocks.mjs            turns a page's text items into headings, paragraphs, lists, code (pure)
@@ -270,18 +373,27 @@ npm test
 ```
 
 runs both suites (`node --test "test/*.test.mjs"` and `claude plugin test .`); it needs
-Node 22.13 or newer, the floor of the reader server (pdf.js in Node). CI runs them on macOS, Linux and Windows;
-`npm run validate` runs `claude plugin validate .`.
+Node 22.13 or newer, the floor of the reader server (pdf.js in Node). The tests
+that render figures need `@napi-rs/canvas` (`npm install`) and are skipped
+without it. CI runs the suites on macOS, Linux and Windows.
+
+```bash
+claude plugin validate .
+```
+
+(or `npm run validate`) checks the manifest and the mod as Claude Code loads them.
 
 While developing, load your clone with `claude --plugin-dir .`: Claude Code
-reloads the mod when you save. Run `/book restart` after changing
-`server/server.mjs`. Claude Code writes the mod's type declarations to
+reloads the mod when you save. Run `/book restart` after changing anything in
+`server/`. Claude Code writes the mod's type declarations to
 `.claude-plugin/types/` when it loads the mod (git ignores them); after that,
 `npx tsc -p .` type-checks the mod.
 
 To move to another PDF.js version: `npm run update-pdfjs -- <version>`, then
 update the version in `NOTICE` and check the reader and text mode. Only the
 `legacy/` build of PDF.js is vendored; the server and the browser viewer both use it.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
