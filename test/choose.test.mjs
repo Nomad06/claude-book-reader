@@ -6,7 +6,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { waitInPieces } from '../server/shared.mjs'
+import { chooseWait, waitInPieces } from '../server/shared.mjs'
 
 /** A dialog the test closes by hand: `settle(value)` or `fail(error)`. */
 function dialog() {
@@ -96,5 +96,17 @@ describe('a file dialog waited on in pieces', () => {
     const whole = poll(undefined)
     setTimeout(() => d.settle({ book: { id: 'abc' } }), 30)
     assert.deepEqual(await whole, { book: { id: 'abc' } })
+  })
+})
+
+describe('how long one /api/choose request waits', () => {
+  test("the mod's waitMs, at most 25 s; none (an older mod) or a bad one waits for the outcome", () => {
+    assert.equal(chooseWait({ waitMs: 20_000 }), 20_000)
+    assert.equal(chooseWait({ waitMs: 0 }), 0)
+    assert.equal(chooseWait({ waitMs: 90_000 }), 25_000)
+    assert.equal(chooseWait({}), undefined)
+    assert.equal(chooseWait({ waitMs: 'soon' }), undefined)
+    assert.equal(chooseWait({ waitMs: -1 }), undefined)
+    assert.equal(chooseWait(null), undefined)
   })
 })

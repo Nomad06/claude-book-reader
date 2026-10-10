@@ -25,6 +25,19 @@ export function tryAgain(counts, key, max, keep = 50) {
   return true
 }
 
+/** Under the 30 s Claude Code gives one request. */
+export const CHOOSE_WAIT_MAX_MS = 25_000
+
+/**
+ * How long one POST /api/choose waits for the dialog: the mod's `waitMs`, at
+ * most CHOOSE_WAIT_MAX_MS; undefined (wait for the outcome) without one, as an
+ * older mod asks, or with one that is no number of milliseconds.
+ */
+export function chooseWait(body) {
+  const waitMs = body?.waitMs
+  return Number.isFinite(waitMs) && waitMs >= 0 ? Math.min(waitMs, CHOOSE_WAIT_MAX_MS) : undefined
+}
+
 /**
  * Work a caller waits on in pieces: Claude Code gives one request 30 s, and a
  * person may keep a file dialog open for minutes. `poll(waitMs)` starts the

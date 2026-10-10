@@ -30,7 +30,7 @@ import {
 } from './platform.mjs'
 import { nodeVersionProblem } from './node-version.mjs'
 import { clampLevels, errorLine, plainText } from './text.mjs'
-import { shared, tryAgain, waitInPieces } from './shared.mjs'
+import { chooseWait, shared, tryAgain, waitInPieces } from './shared.mjs'
 import { createPdfSource, sweepImages, withFigures } from './pdf-source.mjs'
 import { calibrate, isScanned, pageBlocks } from './page-blocks.mjs'
 
@@ -358,7 +358,6 @@ async function chooseFile() {
 
 // One file dialog at a time, its outcome kept for the mod's next request: Claude
 // Code gives one request 30 s, a person may keep the dialog open ten minutes.
-const CHOOSE_WAIT_MAX_MS = 25_000
 const pickBook = waitInPieces(async () => {
   const chosen = await chooseFile()
   if (chosen === null) return { cancelled: true }
@@ -708,8 +707,7 @@ async function route(req, res) {
   if (p === '/api/choose' && m === 'POST') {
     // The mod asks again while the dialog is open: { waitMs } says how long one request may wait.
     const body = await readBody(req)
-    const waitMs = Number.isFinite(body?.waitMs) && body.waitMs >= 0 ? Math.min(body.waitMs, CHOOSE_WAIT_MAX_MS) : undefined
-    return sendJson(res, 200, await pickBook(waitMs))
+    return sendJson(res, 200, await pickBook(chooseWait(body)))
   }
 
   const pageMatch = /^\/api\/books\/([0-9a-f]{12})\/page\/([^/]{1,12})$/.exec(p)
