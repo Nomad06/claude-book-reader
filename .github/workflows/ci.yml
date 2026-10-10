@@ -26,6 +26,9 @@ jobs:
           - os: macos-latest
             node: 22
             canvas: true
+          # The floor in package.json engines and server/node-version.mjs.
+          - os: ubuntu-latest
+            node: '22.13'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,7 +47,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # No type-check here: `npm run typecheck` needs the API types Claude Code
+    # writes to .claude-plugin/types/ when a session loads the mod, and nothing
+    # writes them without one (validate and test do not). Run it locally.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

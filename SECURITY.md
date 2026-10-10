@@ -11,8 +11,9 @@ issue for them.
 ### The reader server
 
 - Runs a small Node.js server bound to `127.0.0.1` only (port 47321 by default),
-  started by the mod with the `node` it finds (22.13 or newer). It stops by
-  itself after 6 hours without use.
+  started by the mod with the first `node` it finds (or **Path to node**). The
+  server checks its own Node version before anything else and refuses to start
+  on one older than 22.13. It stops by itself after 6 hours without use.
 - The server reads only the PDF files you add to the library, and serves only
   the files in `viewer/`.
 - It refuses requests whose `Host` is not its own (DNS rebinding), and API
@@ -31,7 +32,7 @@ issue for them.
   items, 40 pictures (each scaled to at most 800 × 4096 pixels), 5,000 drawing
   boxes and 20 figure marks; it waits at most 10 seconds for a page's pictures.
 - When the optional native module `@napi-rs/canvas` is installed (you run
-  `npm install` in the plugin folder; a marketplace install has no
+  `npm install --omit=dev` in the plugin folder; a marketplace install has no
   `node_modules`), PDF.js also renders figures drawn with lines: at most 4 per
   page, 5 seconds each and 10 seconds per page, 1.5 million pixels each. Without
   it nothing is rendered. Installing it runs npm and downloads a prebuilt binary
@@ -43,6 +44,9 @@ issue for them.
   files to draw the pictures in kitty and Ghostty.
 
 ### Programs it runs
+
+The file dialog of `/book choose` runs as a child of the server: it is closed
+after 10 minutes, and when the server stops.
 
 The mod and the server start the system's own tools, never through a shell
 with your data in it. Book titles, Claude's text and paths reach them only as

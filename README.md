@@ -109,19 +109,26 @@ native module of about 27 MB. A plugin installed from the marketplace comes
 without it; each such figure is then one line,
 `▣ <caption> · drawing · o opens in browser`.
 
-To turn it on, run `npm install` in the plugin's folder, then `/book restart`.
-Claude Code keeps an installed plugin in
-`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, so for this one:
+To turn it on, run `npm install --omit=dev` in the plugin's folder, then
+`/book restart`. Claude Code keeps an installed plugin in
+`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`. Find the version
+folder of this one (the highest version listed):
 
 ```bash
-cd ~/.claude/plugins/cache/claude-book-reader/book-reader/0.2.0
-npm install
+ls ~/.claude/plugins/cache/claude-book-reader/book-reader/
 ```
 
-(on Windows, `%USERPROFILE%\.claude\plugins\cache\claude-book-reader\book-reader\0.2.0`).
-An update installs into a new version folder: run `npm install` there again.
-For a clone loaded with `--plugin-dir`, run `npm install` in the clone. It only
-shows where pictures are drawn (kitty, Ghostty).
+then, with that version in place of `<version>`:
+
+```bash
+cd ~/.claude/plugins/cache/claude-book-reader/book-reader/<version>
+npm install --omit=dev
+```
+
+(on Windows, `%USERPROFILE%\.claude\plugins\cache\claude-book-reader\book-reader\<version>`).
+An update installs into a new version folder: run it there again. For a clone
+loaded with `--plugin-dir`, run `npm install` in the clone. It only shows where
+pictures are drawn (kitty, Ghostty).
 
 ### From a clone
 
@@ -181,7 +188,9 @@ Pick a book once, then just work:
 | `/book restart` | Restart the reader server (books and places are kept) |
 | `/book help` | The list of commands (also `--help`, `-h`) |
 
-`/book choose` waits while the file dialog is open, up to ten minutes.
+`/book choose` waits while the file dialog is open, up to ten minutes; then the
+reader server closes the dialog and says so. If the dialog does not show, it
+may be behind the terminal (a reminder pops up after 20 seconds).
 
 ### Browser mode and text mode
 
@@ -353,19 +362,24 @@ its own. What it runs on your machine, and why, is in [SECURITY.md](SECURITY.md)
 ```
 .claude-plugin/plugin.json        manifest and settings
 .claude-plugin/marketplace.json   lets the repo be added as a marketplace
+hooks/hooks.json                  names the mod's module
 hooks/register.tsx                the mod: /book, turn hooks, the band above the prompt
 hooks/dock.tsx, hooks/reader.tsx  the Reading Dock: dashboard and the text reader view
 hooks/*-logic.ts                  their pure helpers (unit-tested)
-hooks/*.test.tsx                  the mod's tests (claude plugin test)
+hooks/*.test.ts, hooks/*.test.tsx the mod's tests (claude plugin test)
+hooks/test-world.ts               the tests' stand-in for the machine and the reader server
 types/index.d.ts                  the mod's state contract
 server/server.mjs                 the reader server (optional dependency: @napi-rs/canvas)
-server/shared.mjs, server/text.mjs  small helpers (unit-tested)
+server/node-version.mjs           the Node floor (22.13) the server checks before anything else
+server/shared.mjs, server/text.mjs  small helpers: shared work, the file dialog's waits, plain text (unit-tested)
 server/platform.mjs               what it runs on macOS, Linux and Windows (pure, unit-tested)
-server/pdf-source.mjs             opens a PDF with PDF.js in Node: text items, images, outline
+server/pdf-source.mjs             opens a PDF with PDF.js in Node: text items, images, figures, outline
 server/page-blocks.mjs            turns a page's text items into headings, paragraphs, lists, code (pure)
 test/*.test.mjs                   server and extraction tests (node --test); platform tests parse the PowerShell scripts where PowerShell exists
+test/pdf-fixture.mjs              builds the small PDFs the tests read
 viewer/                           the reader page; viewer/vendor/pdfjs is PDF.js
 scripts/update-pdfjs.sh           re-vendors PDF.js
+scripts/typecheck.mjs             npm run typecheck
 ```
 
 ```bash
@@ -375,7 +389,10 @@ npm test
 runs both suites (`node --test "test/*.test.mjs"` and `claude plugin test .`); it needs
 Node 22.13 or newer, the floor of the reader server (pdf.js in Node). The tests
 that render figures need `@napi-rs/canvas` (`npm install`) and are skipped
-without it. CI runs the suites on macOS, Linux and Windows.
+without it. CI runs the server tests (`node --test`) on macOS, Linux and Windows
+with Node 22 and 24, and on Linux with Node 22.13; with `@napi-rs/canvas` on
+Linux and macOS (Node 22). It runs `claude plugin validate .` and
+`claude plugin test .` on macOS, Linux and Windows.
 
 ```bash
 claude plugin validate .
@@ -385,9 +402,17 @@ claude plugin validate .
 
 While developing, load your clone with `claude --plugin-dir .`: Claude Code
 reloads the mod when you save. Run `/book restart` after changing anything in
-`server/`. Claude Code writes the mod's type declarations to
-`.claude-plugin/types/` when it loads the mod (git ignores them); after that,
-`npx tsc -p .` type-checks the mod.
+`server/`.
+
+```bash
+npm run typecheck
+```
+
+type-checks the mod with the TypeScript in `devDependencies` (`npm install`
+first). It needs the API types Claude Code writes to `.claude-plugin/types/`
+when a session loads the mod (`claude --plugin-dir .` once; git ignores them).
+Nothing writes them outside a session, so CI does not run it: run it before a
+pull request.
 
 To move to another PDF.js version: `npm run update-pdfjs -- <version>`, then
 update the version in `NOTICE` and check the reader and text mode. Only the

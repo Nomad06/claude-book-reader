@@ -23,9 +23,11 @@ labels: bug
 - Node.js version (`node --version`):
 - Book Reader version (`/plugin`, or `version` in `.claude-plugin/plugin.json`):
 - Reading mode (`browser` or `text`):
-- `@napi-rs/canvas` installed (`npm install` in the plugin folder)? yes / no
+- `@napi-rs/canvas` installed (`npm install --omit=dev` in the plugin folder)? yes / no
 
 **`/book status` output**
+
+<!-- It shows your book's path: replace your user name and any private folder names before posting. -->
 
 ```
 paste here
