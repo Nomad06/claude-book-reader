@@ -165,7 +165,7 @@ export function closeAppWindow({ platform, profileDir, has }) {
   if (platform === 'win32') return powershell(WINDOWS_CLOSE_READER, { BOOK_READER_PROFILE: profileDir })
   const pkill = platform === 'darwin' ? '/usr/bin/pkill' : has('pkill') ? 'pkill' : null
   if (!pkill) return null
-  return { command: pkill, args: ['-f', '--', `--user-data-dir=${escapeRegex(profileDir)}`] }
+  return { command: pkill, args: ['-f', '--', profilePattern(profileDir)] }
 }
 
 /**
@@ -186,12 +186,17 @@ export function raiseAppWindow({ platform, profileDir, has }) {
   }
   const pgrep = platform === 'darwin' ? '/usr/bin/pgrep' : has('pgrep') ? 'pgrep' : null
   if (!pgrep) return null
-  const find = { command: pgrep, args: ['-f', '-o', '--', `--user-data-dir=${escapeRegex(profileDir)}`] }
+  const find = { command: pgrep, args: ['-f', '-o', '--', profilePattern(profileDir)] }
   if (platform === 'darwin') {
     return { find, raise: pid => (isPid(pid) ? { command: '/usr/bin/osascript', args: ['-l', 'JavaScript', '-e', MAC_ACTIVATE_PID.replace('PID', String(pid))] } : null) }
   }
   if (!has('xdotool')) return null
   return { find, raise: pid => (isPid(pid) ? { command: 'xdotool', args: ['search', '--onlyvisible', '--pid', String(pid), 'windowactivate'] } : null) }
+}
+
+/** The command-line argument of the profile, anchored: a sibling folder that starts with the same path is not it. */
+export function profilePattern(profileDir) {
+  return `--user-data-dir=${escapeRegex(profileDir)}( |$)`
 }
 
 function isPid(value) {
@@ -292,7 +297,7 @@ export const WINDOWS_CLOSE_READER = `
 $ErrorActionPreference = 'SilentlyContinue'
 $marker = "--user-data-dir=$env:BOOK_READER_PROFILE"
 Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($marker) } |
+  Where-Object { $_.CommandLine -and ($_.CommandLine.EndsWith($marker) -or $_.CommandLine.Contains($marker + ' ') -or $_.CommandLine.Contains($marker + '"')) } |
   ForEach-Object {
     $process = Get-Process -Id $_.ProcessId
     if ($process -and $process.MainWindowHandle -ne [IntPtr]::Zero) { [void]$process.CloseMainWindow() }
@@ -311,7 +316,7 @@ $ErrorActionPreference = 'Stop'
 $marker = "--user-data-dir=$env:BOOK_READER_PROFILE"
 $shell = New-Object -ComObject WScript.Shell
 $found = Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($marker) } |
+  Where-Object { $_.CommandLine -and ($_.CommandLine.EndsWith($marker) -or $_.CommandLine.Contains($marker + ' ') -or $_.CommandLine.Contains($marker + '"')) } |
   Where-Object { (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue).MainWindowHandle -ne [IntPtr]::Zero } |
   Select-Object -First 1
 if ($found -and $shell.AppActivate([int]$found.ProcessId)) { exit 0 }

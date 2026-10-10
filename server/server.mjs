@@ -373,7 +373,7 @@ function closeReaderWindow() {
   if (plan) runPlan(plan, 10_000)
 }
 
-let raiseFailureLogged = false
+const raiseFailuresLogged = new Set()
 
 /**
  * Raises the reader's own window (the --app one) above the others. Never throws;
@@ -382,8 +382,9 @@ let raiseFailureLogged = false
 async function raiseReaderWindow() {
   if (!CAN_LAUNCH) return { raised: false, raiseReason: 'off' }
   const fail = (reason, detail) => {
-    if (!raiseFailureLogged) {
-      raiseFailureLogged = true
+    // Once per reason; a window that is not running is not worth a line.
+    if (reason !== 'not-running' && !raiseFailuresLogged.has(reason)) {
+      raiseFailuresLogged.add(reason)
       console.error(`[book-reader] could not raise the reader window: ${detail ?? reason}`)
     }
     return { raised: false, raiseReason: reason }

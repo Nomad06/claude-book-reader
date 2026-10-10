@@ -24,6 +24,7 @@ import {
   focusApp,
   noPickerReason,
   notification,
+  profilePattern,
   raiseAppWindow,
 } from '../server/platform.mjs'
 
@@ -69,7 +70,7 @@ describe('macOS', () => {
     assert.ok(plan.args.includes('--no-first-run'))
     const close = closeAppWindow({ platform: 'darwin', profileDir: '/Users/me/.claude/book-reader/reader-profile', has: nothing })
     assert.equal(close.command, '/usr/bin/pkill')
-    assert.deepEqual(close.args, ['-f', '--', '--user-data-dir=/Users/me/\\.claude/book-reader/reader-profile'])
+    assert.deepEqual(close.args, ['-f', '--', '--user-data-dir=/Users/me/\\.claude/book-reader/reader-profile( |$)'])
   })
 
   test('switches back to the app of the session by its bundle id', () => {
@@ -249,7 +250,7 @@ describe('raising the reader window', () => {
     const plan = raiseAppWindow({ platform: 'darwin', profileDir: '/Users/me/.claude/book-reader/reader-profile', has: nothing })
     assert.deepEqual(plan.find, {
       command: '/usr/bin/pgrep',
-      args: ['-f', '-o', '--', '--user-data-dir=/Users/me/\\.claude/book-reader/reader-profile'],
+      args: ['-f', '-o', '--', '--user-data-dir=/Users/me/\\.claude/book-reader/reader-profile( |$)'],
     })
     const raise = plan.raise(98292)
     assert.equal(raise.command, '/usr/bin/osascript')
@@ -280,5 +281,27 @@ describe('raising the reader window', () => {
     assert.deepEqual(raise.env, { BOOK_READER_PROFILE: 'C:\\Users\\me\\reader-profile' })
     assert.match(decodeScript(raise), /AppActivate/)
     assert.ok(!decodeScript(raise).includes('reader-profile'))
+  })
+})
+
+describe('the profile of the reader is matched whole', () => {
+  const profile = '/Users/me/.claude/book-reader/reader-profile'
+  test('pgrep and pkill patterns do not match a sibling folder with the same prefix', () => {
+    const raise = raiseAppWindow({ platform: 'darwin', profileDir: profile, has: nothing }).find.args.at(-1)
+    const close = closeAppWindow({ platform: 'darwin', profileDir: profile, has: nothing }).args.at(-1)
+    for (const pattern of [raise, close, profilePattern(profile)]) {
+      const re = new RegExp(pattern)
+      assert.ok(re.test(`Chrome --app=x --user-data-dir=${profile} --no-first-run`))
+      assert.ok(re.test(`Chrome --user-data-dir=${profile}`))
+      assert.ok(!re.test(`Chrome --user-data-dir=${profile}2 --no-first-run`))
+      assert.ok(!re.test(`Chrome --user-data-dir=${profile}-old`))
+    }
+  })
+
+  test('the Windows scripts compare the whole argument', () => {
+    for (const plan of [raiseAppWindow({ platform: 'win32', profileDir: 'C:\\p', has: nothing }).raise(), closeAppWindow({ platform: 'win32', profileDir: 'C:\\p', has: nothing })]) {
+      assert.doesNotMatch(decodeScript(plan), /CommandLine\.Contains\(\$marker\)/)
+      assert.match(decodeScript(plan), /EndsWith\(\$marker\)/)
+    }
   })
 })
