@@ -310,9 +310,15 @@ function where(book: BookSummary): string {
 }
 
 // Opens the reader window, or brings the open one forward (at `page`, when
-// given); false when there is no book.
-async function show($: EngineInterface, page?: number): Promise<boolean> {
-  const shown = await api<{ shown: boolean; reason?: string; url?: string }>($, 'POST', '/api/show', { window: cfg.window, page })
+// given); false when there is no book. `raise` only from a person's own action
+// (never the auto-open): the server then also raises the window of the reader
+// that is already open, which a page cannot do for itself.
+async function show($: EngineInterface, page?: number, raise = false): Promise<boolean> {
+  const shown = await api<{ shown: boolean; reason?: string; url?: string }>($, 'POST', '/api/show', {
+    window: cfg.window,
+    page,
+    ...(raise ? { raise: true } : {}),
+  })
   if (shown.reason === 'no-browser') throw new Error(`no browser could be opened; open ${shown.url} yourself`)
   return shown.shown
 }
@@ -326,7 +332,7 @@ async function present($: EngineInterface, page?: number, asked = true, isComman
   await ensureServer($)
   const state = await readerState($)
   if (modeOf(state) === 'browser') {
-    if (!(await show($, page))) return null
+    if (!(await show($, page, asked))) return null
     return (await readerState($))?.current ?? null
   }
   const book = state?.current ?? null
@@ -596,7 +602,7 @@ async function dockPress($: EngineInterface, element: string): Promise<void> {
     const book = await currentReaderBook($)
     const shown = book ? await shownPageOf($, book) : null
     await ensureServer($)
-    await show($, shown?.page)
+    await show($, shown?.page, true)
     startDockPoll($)
     return
   }
@@ -855,7 +861,7 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
   if (verb === 'open' && rest[0]?.toLowerCase() === 'browser') {
     const state = await api<ReaderState>($, 'GET', '/api/state')
     if (!state.current) return 'No book chosen: /book choose'
-    await show($, (await shownPageOf($, state.current))?.page)
+    await show($, (await shownPageOf($, state.current))?.page, true)
     return `📖 ${state.current.title} · ${where(state.current)} · in the browser`
   }
 

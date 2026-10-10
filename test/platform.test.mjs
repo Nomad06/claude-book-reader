@@ -24,6 +24,7 @@ import {
   focusApp,
   noPickerReason,
   notification,
+  raiseAppWindow,
 } from '../server/platform.mjs'
 
 // The mod's own PowerShell (it finds the window that runs the session).
@@ -240,5 +241,44 @@ describe('return targets', () => {
     assert.equal(cleanTarget({ bundleId: '../../evil', windowId: 'x', pid: '7' }), null)
     assert.equal(cleanTarget('com.apple.Terminal'), null)
     assert.equal(cleanTarget(null), null)
+  })
+})
+
+describe('raising the reader window', () => {
+  test('macOS finds the main process by the profile and activates it by pid', () => {
+    const plan = raiseAppWindow({ platform: 'darwin', profileDir: '/Users/me/.claude/book-reader/reader-profile', has: nothing })
+    assert.deepEqual(plan.find, {
+      command: '/usr/bin/pgrep',
+      args: ['-f', '-o', '--', '--user-data-dir=/Users/me/\\.claude/book-reader/reader-profile'],
+    })
+    const raise = plan.raise(98292)
+    assert.equal(raise.command, '/usr/bin/osascript')
+    assert.deepEqual(raise.args.slice(0, 2), ['-l', 'JavaScript'])
+    assert.match(raise.args[3], /runningApplicationWithProcessIdentifier\(98292\)/)
+    assert.match(raise.args[3], /activateWithOptions\(3\)/)
+  })
+
+  test('a pid that is not a positive integer gives no plan', () => {
+    const plan = raiseAppWindow({ platform: 'darwin', profileDir: PROFILE, has: nothing })
+    for (const bad of ['1); evil(', 0, -4, 1.5, NaN, null, undefined]) assert.equal(plan.raise(bad), null)
+  })
+
+  test('Linux needs pgrep and xdotool, and searches the windows of the pid', () => {
+    assert.equal(raiseAppWindow({ platform: 'linux', profileDir: PROFILE, has: only('pgrep') }), null)
+    assert.equal(raiseAppWindow({ platform: 'linux', profileDir: PROFILE, has: only('xdotool') }), null)
+    const plan = raiseAppWindow({ platform: 'linux', profileDir: PROFILE, has: only('pgrep', 'xdotool') })
+    assert.equal(plan.find.command, 'pgrep')
+    assert.deepEqual(plan.raise(4242), { command: 'xdotool', args: ['search', '--onlyvisible', '--pid', '4242', 'windowactivate'] })
+    assert.equal(plan.raise('4242; rm'), null)
+  })
+
+  test('Windows is one script that takes the profile from the environment', () => {
+    const plan = raiseAppWindow({ platform: 'win32', profileDir: 'C:\\Users\\me\\reader-profile', has: nothing })
+    assert.equal(plan.find, null)
+    const raise = plan.raise()
+    assert.equal(raise.command, 'powershell.exe')
+    assert.deepEqual(raise.env, { BOOK_READER_PROFILE: 'C:\\Users\\me\\reader-profile' })
+    assert.match(decodeScript(raise), /AppActivate/)
+    assert.ok(!decodeScript(raise).includes('reader-profile'))
   })
 })

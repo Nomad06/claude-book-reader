@@ -327,6 +327,16 @@ describe('task events', () => {
     assert.deepEqual(show.json, { shown: true, launched: false })
     await stream.next('attention')
 
+    // Only a person's action asks to raise the window; under --no-launch it is
+    // asked for and declined, never done.
+    assert.equal(show.json.raised, undefined)
+    const raise = await request('POST', '/api/show', { body: { window: 'app', raise: true } })
+    assert.deepEqual(raise.json, { shown: true, launched: false, raised: false, raiseReason: 'off' })
+    await stream.next('attention')
+    const tab = await request('POST', '/api/show', { body: { window: 'browser', raise: true } })
+    assert.deepEqual(tab.json, { shown: true, launched: false, raised: false, raiseReason: 'browser-tab' })
+    await stream.next('attention')
+
     await request('POST', '/api/close')
     await stream.next('close')
 

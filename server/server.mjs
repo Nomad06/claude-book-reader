@@ -21,6 +21,7 @@ import {
   appWindow,
   cleanTarget,
   closeAppWindow,
+  raiseAppWindow,
   defaultBrowser,
   filePicker,
   focusApp,
@@ -370,6 +371,40 @@ function closeReaderWindow() {
   if (!CAN_LAUNCH) return
   const plan = closeAppWindow({ ...host, profileDir: PROFILE_DIR })
   if (plan) runPlan(plan, 10_000)
+}
+
+let raiseFailureLogged = false
+
+/**
+ * Raises the reader's own window (the --app one) above the others. Never throws;
+ * the reason says why it did not. A failure is logged once.
+ */
+async function raiseReaderWindow() {
+  if (!CAN_LAUNCH) return { raised: false, raiseReason: 'off' }
+  const fail = (reason, detail) => {
+    if (!raiseFailureLogged) {
+      raiseFailureLogged = true
+      console.error(`[book-reader] could not raise the reader window: ${detail ?? reason}`)
+    }
+    return { raised: false, raiseReason: reason }
+  }
+  try {
+    const plans = raiseAppWindow({ ...host, profileDir: PROFILE_DIR })
+    if (!plans) return fail('unsupported')
+    let pid = 0
+    if (plans.find) {
+      const found = await runPlan(plans.find, 5_000)
+      pid = Number.parseInt(found.stdout.trim().split(/\s+/)[0], 10)
+      if (found.code !== 0 || !(pid > 0)) return fail('not-running', 'the reader window is not running')
+    }
+    const plan = plans.raise(pid)
+    if (!plan) return fail('unsupported')
+    const { code, stdout, stderr } = await runPlan(plan, 10_000)
+    if (code !== 0 || stdout.includes('no app')) return fail('failed', stderr.trim() || stdout.trim() || `exit ${code}`)
+    return { raised: true }
+  } catch (error) {
+    return fail('failed', error instanceof Error ? error.message : String(error))
+  }
 }
 
 function canReturn() {
@@ -734,7 +769,12 @@ async function route(req, res) {
     }
     if (clients.size > 0) {
       broadcast(page === null ? { type: 'attention' } : { type: 'goto', id: book.id, page })
-      return sendJson(res, 200, { shown: true, launched: false })
+      // A browser cannot raise its own window: when the person asked (raise),
+      // the server does it, for the reader's own window only. A tab of the
+      // default browser is left alone (there is no way to find it).
+      if (body.raise !== true) return sendJson(res, 200, { shown: true, launched: false })
+      const raised = body.window === 'browser' ? { raised: false, raiseReason: 'browser-tab' } : await raiseReaderWindow()
+      return sendJson(res, 200, { shown: true, launched: false, ...raised })
     }
     if (Date.now() - lastLaunchAt < 8000) return sendJson(res, 200, { shown: true, launched: false })
     const how = launchViewer(body.window === 'browser' ? 'browser' : 'app')

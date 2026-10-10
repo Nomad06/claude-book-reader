@@ -15,6 +15,8 @@ describe('book-reader', () => {
 
     await clock.advance(5_000)
     expect(posted('/api/show')).toHaveLength(1)
+    // The auto-open never steals focus while Claude works.
+    expect(posted('/api/show')[0]?.body?.raise).toBeUndefined()
 
     await $.turn.complete({ answer: 'All done.', durationMs: 90_000, isAborted: false, turnId: 't1', reason: 'answer' })
     const ended = posted('/api/task').at(-1)
@@ -32,6 +34,13 @@ describe('book-reader', () => {
     expect(posted('/api/task').at(-1)?.body).toEqual({ state: 'ack' })
     expect(await ui.find({ type: 'Text', text: /Task finished/ })).toBeUndefined()
     await ui.unmount()
+  })
+
+  test('/book in browser mode asks to raise the window; the auto-open does not', async ($, on) => {
+    const reader: Reader = { viewers: 1, hasBook: true, mode: 'browser' }
+    const { posted } = world(on, reader)
+    await $.command.run({ ...RUN, command: 'book', args: '' })
+    expect(posted('/api/show').at(-1)?.body).toMatchObject({ raise: true })
   })
 
   test('a short task never opens the book', async ($, on) => {
@@ -334,7 +343,7 @@ describe('book-reader', () => {
     await clock.advance(5_000)
     const ui = await mountDock($, 'terminal')
     await ui.press({ key: 'reader-open' })
-    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', page: 42 })
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', page: 42, raise: true })
     await ui.unmount()
   })
 
@@ -363,7 +372,7 @@ describe('book-reader', () => {
     reader.book = { id: OTHER, title: 'Emma', page: 9, pages: 50 }
     const opened = await $.command.run({ ...RUN, command: 'book', args: 'open browser' })
     expect(opened.text).toContain('Emma')
-    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app' })
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', raise: true })
   })
 
   test('a page left from another book: m, o, go to and n start from this book', async ($, on) => {
@@ -381,7 +390,7 @@ describe('book-reader', () => {
     await ui.press({ key: 'reader-mark' })
     expect(posted(`/api/books/${OTHER}/progress`)).toHaveLength(0)
     await ui.press({ key: 'reader-open' })
-    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app' })
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', raise: true })
     await $.ui.input({ plugin: 'book-reader', key: 'reader-goto', text: '60' })
     expect(state('readerNote')).toContain('No page 60; the book has 50')
     await ui.press({ key: 'reader-next' })

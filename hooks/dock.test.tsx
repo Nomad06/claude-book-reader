@@ -121,7 +121,7 @@ describe('reading dock face', () => {
     const { posted } = await openOnTask($, on, { outline: OUTLINE })
     const ui = await mountDock($, 'terminal')
     await ui.press({ key: 'ch-200-2' })
-    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', page: 200 })
+    expect(posted('/api/show').at(-1)?.body).toEqual({ window: 'app', page: 200, raise: true })
     await ui.unmount()
   })
 

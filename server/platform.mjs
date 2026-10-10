@@ -169,6 +169,36 @@ export function closeAppWindow({ platform, profileDir, has }) {
 }
 
 /**
+ * Raises the reader's own browser window above the other windows (a page in a
+ * browser cannot raise its own window). The instance is found by its profile
+ * folder, like closeAppWindow. Windows: one plan. macOS and Linux: `find` lists
+ * the process ids that run the profile (the oldest first, which is the main
+ * process: its helpers start later), and `raise(pid)` activates that one. Null
+ * where there is no way to do it (Linux without pgrep and xdotool).
+ *
+ * @param {{ platform: string, profileDir: string, has: (command: string) => boolean }} host
+ * @returns {{ find: object | null, raise: (pid: number) => object | null } | { find: null, raise: () => object } | null}
+ */
+export function raiseAppWindow({ platform, profileDir, has }) {
+  if (platform === 'win32') {
+    const plan = powershell(WINDOWS_RAISE_READER, { BOOK_READER_PROFILE: profileDir })
+    return { find: null, raise: () => plan }
+  }
+  const pgrep = platform === 'darwin' ? '/usr/bin/pgrep' : has('pgrep') ? 'pgrep' : null
+  if (!pgrep) return null
+  const find = { command: pgrep, args: ['-f', '-o', '--', `--user-data-dir=${escapeRegex(profileDir)}`] }
+  if (platform === 'darwin') {
+    return { find, raise: pid => (isPid(pid) ? { command: '/usr/bin/osascript', args: ['-l', 'JavaScript', '-e', MAC_ACTIVATE_PID.replace('PID', String(pid))] } : null) }
+  }
+  if (!has('xdotool')) return null
+  return { find, raise: pid => (isPid(pid) ? { command: 'xdotool', args: ['search', '--onlyvisible', '--pid', String(pid), 'windowactivate'] } : null) }
+}
+
+function isPid(value) {
+  return Number.isInteger(value) && value > 0
+}
+
+/**
  * Brings the app that runs the Claude Code session to the front: macOS by the
  * app's bundle id, Linux (X11) by the terminal's window id, Windows by the id
  * of the process that owns the window.
@@ -276,6 +306,18 @@ if ($shell.AppActivate([int]$env:BOOK_READER_PID)) { exit 0 }
 exit 1
 `
 
+export const WINDOWS_RAISE_READER = `
+$ErrorActionPreference = 'Stop'
+$marker = "--user-data-dir=$env:BOOK_READER_PROFILE"
+$shell = New-Object -ComObject WScript.Shell
+$found = Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($marker) } |
+  Where-Object { (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue).MainWindowHandle -ne [IntPtr]::Zero } |
+  Select-Object -First 1
+if ($found -and $shell.AppActivate([int]$found.ProcessId)) { exit 0 }
+exit 1
+`
+
 function powershell(script, env) {
   return {
     command: 'powershell.exe',
@@ -294,6 +336,10 @@ function powershell(script, env) {
 }
 
 // ---------------------------------------------------------------- macOS
+
+// The pid is substituted for PID only after it passed isPid (an integer).
+export const MAC_ACTIVATE_PID =
+  'ObjC.import("AppKit"); const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(PID); a.isNil() ? "no app" : String(a.activateWithOptions(3))'
 
 /** An AppleScript string literal: backslashes and double quotes escaped. */
 export function appleString(text) {
