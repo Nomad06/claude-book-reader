@@ -630,7 +630,9 @@ describe('untrusted titles', () => {
     assert.equal(book.outline[0].title, '[31mRed[0m Chapter')
   })
 
-  test('a file name with control characters gives a plain title', async () => {
+  // Windows refuses control characters in file names, so such a book cannot exist there.
+  const noControlNames = process.platform === 'win32' ? 'Windows file names cannot hold control characters' : false
+  test('a file name with control characters gives a plain title', { skip: noControlNames }, async () => {
     const file = await writePdf('esc\u001b[2Jname.pdf')
     const { json } = await request('POST', '/api/books', { body: { path: file } })
     assert.equal(json.book.title, 'esc[2Jname')
