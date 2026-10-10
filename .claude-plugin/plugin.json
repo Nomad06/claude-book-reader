@@ -1,6 +1,6 @@
 {
   "name": "book-reader",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Opens your PDF book while Claude works, or reads it inside the terminal; resumes where you stopped, remembers read pages, and tells you when the task is done.",
   "author": {
     "name": "Nomad06",
