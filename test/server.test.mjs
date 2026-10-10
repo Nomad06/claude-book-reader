@@ -359,6 +359,14 @@ describe('task events', () => {
     assert.equal((await request('POST', '/api/task', { body: { state: 'party' } })).status, 400)
   })
 
+  test('the file dialog is off under --no-launch, whether the mod waits in pieces or not', async () => {
+    for (const body of [undefined, { waitMs: 20_000 }, { waitMs: 'soon' }]) {
+      const res = await request('POST', '/api/choose', { body })
+      assert.equal(res.status, 501)
+      assert.match(res.json.error, /file picker is off/)
+    }
+  })
+
   test('with no reader open, show launches nothing under --no-launch', async () => {
     const res = await request('POST', '/api/show', { body: { window: 'browser' } })
     assert.equal(res.json.shown, true)

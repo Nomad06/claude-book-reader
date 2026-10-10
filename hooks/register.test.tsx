@@ -126,6 +126,58 @@ describe('book-reader', () => {
     expect(posted('/api/shutdown')).toHaveLength(1)
   })
 
+  test('an update from 0.1.1 to 0.2.0 replaces the 0.1.1 server, which has no text mode', async ($, on) => {
+    const reader: Reader = { viewers: 0, hasBook: true, version: '0.1.1' }
+    const { posted, daemon } = world(on, reader, { manifestVersion: '0.2.0' })
+
+    await $.command.run({ ...RUN, command: 'book', args: 'list' })
+    expect(posted('/api/shutdown')).toHaveLength(1)
+    expect(daemon()).toBeDefined()
+    expect(reader.version).toBe('0.2.0')
+  })
+
+  test('/book help, --help and -h print the help, in any case', async ($, on) => {
+    const { posted } = world(on, { viewers: 0, hasBook: true })
+
+    for (const args of ['help', 'HELP', '?', '--help', '--HELP', '-h', '-H', ' --help ']) {
+      const answer = await $.command.run({ ...RUN, command: 'book', args })
+      expect(answer.text).toContain('/book choose          pick a PDF with the system file dialog')
+    }
+    expect(posted('/api/books')).toHaveLength(0)
+  })
+
+  test('/book choose keeps waiting while the file dialog stays open past one request', async ($, on) => {
+    // The engine gives one request 30 s; the server answers "still open" before that.
+    const reader: Reader = { viewers: 0, hasBook: true, choosePending: 3, choosesBook: true }
+    const { posted } = world(on, reader)
+
+    const chosen = await $.command.run({ ...RUN, command: 'book', args: 'choose' })
+    expect(chosen.text).toContain('Now reading “Dune”')
+    const asks = posted('/api/choose')
+    expect(asks).toHaveLength(4)
+    for (const ask of asks) {
+      expect(typeof ask.body?.waitMs).toBe('number')
+      expect(ask.body?.waitMs as number).toBeLessThan(30_000)
+    }
+  })
+
+  test('/book choose: a dialog cancelled after a while is no book', async ($, on) => {
+    const { posted } = world(on, { viewers: 0, hasBook: true, choosePending: 2 })
+
+    const chosen = await $.command.run({ ...RUN, command: 'book', args: 'choose' })
+    expect(chosen.text).toBe('No book chosen.')
+    expect(posted('/api/choose')).toHaveLength(3)
+  })
+
+  test('/book choose stops waiting once the dialog has had its ten minutes', async ($, on) => {
+    const { posted } = world(on, { viewers: 0, hasBook: true, choosePending: 1_000 })
+
+    const chosen = await $.command.run({ ...RUN, command: 'book', args: 'choose' })
+    expect(chosen.text).toContain('the file dialog is still open')
+    // Twenty-second waits: about ten minutes of them, then it stops.
+    expect(posted('/api/choose').length).toBeLessThan(40)
+  })
+
   test('the server is started with node and told which install started it', async ($, on) => {
     const reader: Reader = { viewers: 0, hasBook: true, isUp: false }
     const { daemon, root } = world(on, reader)

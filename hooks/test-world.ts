@@ -37,6 +37,10 @@ export type Reader = {
   holdPages?: number[]
   /** Pages whose fetch fails, as the server answers a book whose file is gone. */
   failPages?: number[]
+  /** How many /api/choose requests answer "still open" before the dialog's outcome. */
+  choosePending?: number
+  /** The dialog's outcome: the current book picked, else (default) a cancel. */
+  choosesBook?: boolean
 }
 
 export type Host = {
@@ -57,6 +61,8 @@ export type Host = {
   shownPane?: boolean
   /** What the server prints when it refuses to start (exit 1), e.g. node too old. */
   daemonFails?: string
+  /** The version in this install's manifest (default 1.2.3); a server it starts reports it. */
+  manifestVersion?: string
 }
 
 const ok = (stdout: string, exitCode = 0) => ({
@@ -66,7 +72,7 @@ const ok = (stdout: string, exitCode = 0) => ({
 // A stand-in for the machine and for server/server.mjs: answers the module's
 // process, file and HTTP calls, and records them.
 export function world(on: On, reader: Reader, hostOptions: Host = {}) {
-  const host = { os: 'unix', cwd: '/home/me/project', files: [], ...hostOptions }
+  const host = { os: 'unix', cwd: '/home/me/project', files: [], manifestVersion: '1.2.3', ...hostOptions }
   const calls: Call[] = []
   const runs: string[][] = []
   const scrolls: UiScrollArgs[] = []
@@ -83,7 +89,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
     // On Windows the engine hands the path over with backslashes.
     if (!e.path.replaceAll('\\', '/').endsWith(MANIFEST)) return { deny: 'not in this test' }
     pluginRoot = e.path.slice(0, -MANIFEST.length)
-    return { value: JSON.stringify({ version: '1.2.3' }) }
+    return { value: JSON.stringify({ version: host.manifestVersion }) }
   })
   // The test runs on this machine, whose engine resolves a Windows path against its own cwd.
   on('fs.exists', ($, e) => ({ value: host.files.some(file => e.path === file || e.path.endsWith(`/${file}`)) }))
@@ -148,7 +154,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
     if (e.argv.includes('--daemon')) {
       if (host.daemonFails) return { value: { exitCode: 1, stdout: '', stderr: `${host.daemonFails}\n`, isStdoutTruncated: false, isStderrTruncated: false } }
       const launchedFrom = e.argv[e.argv.indexOf('--launched-from') + 1]
-      Object.assign(reader, { isUp: true, version: '1.2.3', launchedFrom })
+      Object.assign(reader, { isUp: true, version: host.manifestVersion, launchedFrom })
     }
     return ok('{"ok":true}')
   })
@@ -186,6 +192,13 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
         return json({ ...book, read: reader.readPages ?? reader.read ?? [], outline: reader.outline ?? null })
       case '/api/books':
         return json({ book: { ...BOOK, path: body?.path } })
+      case '/api/choose':
+        // The server answers "still open" while the dialog is (each request within its waitMs).
+        if ((reader.choosePending ?? 0) > 0) {
+          reader.choosePending = (reader.choosePending ?? 0) - 1
+          return json({ pending: true })
+        }
+        return json(reader.choosesBook ? { book } : { cancelled: true })
       case '/api/show':
         if (reader.hasNoBrowser) return json({ shown: false, reason: 'no-browser', url: 'http://127.0.0.1:47321/' })
         reader.viewers = 1

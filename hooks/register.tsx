@@ -29,6 +29,7 @@ const readerMode = atom({ plugin: 'book-reader', key: 'readerMode' } as const, '
 
 const HELP = [
   '/book                 open the current book now (or pick one)',
+  '/book help            this list (also --help, -h)',
   '/book choose          pick a PDF with the system file dialog',
   '/book <file.pdf>      read that PDF (absolute, ~/ or relative to this project)',
   '/book list            your books with progress; /book <n> switches to one',
@@ -748,7 +749,7 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
   const [word = '', ...rest] = args.split(/\s+/)
   const verb = word.toLowerCase()
 
-  if (verb === 'help' || verb === '?') return HELP
+  if (verb === 'help' || verb === '--help' || verb === '-h' || verb === '?') return HELP
 
   if (verb === 'auto') {
     const value = rest[0]?.toLowerCase()
@@ -852,7 +853,7 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
   }
 
   if (verb === 'choose' || verb === 'pick') {
-    const chosen = await api<{ cancelled?: boolean; book?: BookSummary }>($, 'POST', '/api/choose')
+    const chosen = await chooseBook($)
     if (chosen.cancelled || !chosen.book) return 'No book chosen.'
     const shown = await present($, undefined, true, true)
     return `📖 Now reading “${chosen.book.title}” · ${where(shown ?? chosen.book)}\n${await autoLine($)}`
@@ -878,6 +879,24 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
   const added = await api<{ book: BookSummary }>($, 'POST', '/api/books', { path })
   const shown = await present($, undefined, true, true)
   return `📖 Now reading “${added.book.title}” · ${where(shown ?? added.book)}\n${await autoLine($)}`
+}
+
+// The engine gives one request 30 s; the server's file dialog stays open up to
+// ten minutes. Each request waits CHOOSE_WAIT_MS at most, then asks again.
+const CHOOSE_WAIT_MS = 20_000
+const CHOOSE_LIMIT_MS = 10 * 60_000 + CHOOSE_WAIT_MS
+
+async function chooseBook($: EngineInterface): Promise<{ cancelled?: boolean; book?: BookSummary }> {
+  const until = (await $.clock.now()) + CHOOSE_LIMIT_MS
+  // A server that answered at once each time would loop: count the requests too.
+  for (let asked = 0; asked * CHOOSE_WAIT_MS < CHOOSE_LIMIT_MS; asked++) {
+    const answer = await api<{ pending?: boolean; cancelled?: boolean; book?: BookSummary }>($, 'POST', '/api/choose', {
+      waitMs: CHOOSE_WAIT_MS,
+    })
+    if (!answer.pending) return answer
+    if ((await $.clock.now()) >= until) break
+  }
+  throw new Error('the file dialog is still open; pick a PDF there, then run /book')
 }
 
 async function autoLine($: EngineInterface): Promise<string> {
@@ -955,7 +974,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'book',
       description: 'Book reader: pick a PDF, open or close it, list books, auto-open on/off',
-      argumentHint: '[choose | <file.pdf> | list | <n> | close | dock | mode text|browser | auto on|off | delay <s> | status | restart]',
+      argumentHint: '[choose | <file.pdf> | list | <n> | close | dock | mode text|browser | auto on|off | delay <s> | status | restart | help]',
       immediate: true,
     })
     // Pictures in the reader view: drawn where the terminal speaks kitty graphics.

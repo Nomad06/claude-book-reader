@@ -30,7 +30,7 @@ import {
 } from './platform.mjs'
 import { nodeVersionProblem } from './node-version.mjs'
 import { clampLevels, errorLine, plainText } from './text.mjs'
-import { shared, tryAgain } from './shared.mjs'
+import { shared, tryAgain, waitInPieces } from './shared.mjs'
 import { createPdfSource, sweepImages, withFigures } from './pdf-source.mjs'
 import { calibrate, isScanned, pageBlocks } from './page-blocks.mjs'
 
@@ -355,6 +355,15 @@ async function chooseFile() {
   if (/-128|cancel/i.test(stderr) || (code === 1 && !stderr.trim())) return null
   throw httpError(500, stderr.trim() || `the file dialog failed (exit ${code})`)
 }
+
+// One file dialog at a time, its outcome kept for the mod's next request: Claude
+// Code gives one request 30 s, a person may keep the dialog open ten minutes.
+const CHOOSE_WAIT_MAX_MS = 25_000
+const pickBook = waitInPieces(async () => {
+  const chosen = await chooseFile()
+  if (chosen === null) return { cancelled: true }
+  return { book: summary(await addBook(chosen)) }
+})
 
 /** Brings the app that runs the Claude Code session to the front. */
 async function focusClaude() {
@@ -697,9 +706,10 @@ async function route(req, res) {
     return sendJson(res, 200, { book: summary(await addBook(body.path)) })
   }
   if (p === '/api/choose' && m === 'POST') {
-    const chosen = await chooseFile()
-    if (chosen === null) return sendJson(res, 200, { cancelled: true })
-    return sendJson(res, 200, { book: summary(await addBook(chosen)) })
+    // The mod asks again while the dialog is open: { waitMs } says how long one request may wait.
+    const body = await readBody(req)
+    const waitMs = Number.isFinite(body?.waitMs) && body.waitMs >= 0 ? Math.min(body.waitMs, CHOOSE_WAIT_MAX_MS) : undefined
+    return sendJson(res, 200, await pickBook(waitMs))
   }
 
   const pageMatch = /^\/api\/books\/([0-9a-f]{12})\/page\/([^/]{1,12})$/.exec(p)
