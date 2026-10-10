@@ -29,59 +29,77 @@ export function tryAgain(counts, key, max, keep = 50) {
 export const CHOOSE_WAIT_MAX_MS = 25_000
 
 /**
- * How long one POST /api/choose waits for the dialog: the mod's `waitMs`, at
- * most CHOOSE_WAIT_MAX_MS; undefined (wait for the outcome) without one, as an
- * older mod asks, or with one that is no number of milliseconds.
+ * What one POST /api/choose asks. `waitMs`: how long it waits for the dialog,
+ * at most CHOOSE_WAIT_MAX_MS; undefined (wait for the outcome) without one, as
+ * an older mod asks, or with one that is no number of milliseconds. `id`: the
+ * dialog an earlier answer named, which the mod echoes.
  */
-export function chooseWait(body) {
+export function chooseRequest(body) {
   const waitMs = body?.waitMs
-  return Number.isFinite(waitMs) && waitMs >= 0 ? Math.min(waitMs, CHOOSE_WAIT_MAX_MS) : undefined
+  const id = body?.id
+  return {
+    waitMs: Number.isFinite(waitMs) && waitMs >= 0 ? Math.min(waitMs, CHOOSE_WAIT_MAX_MS) : undefined,
+    id: typeof id === 'string' && id.length > 0 && id.length <= 64 ? id : undefined,
+  }
 }
 
 /**
  * Work a caller waits on in pieces: Claude Code gives one request 30 s, and a
- * person may keep a file dialog open for minutes. `poll(waitMs)` starts the
- * work (`open()`) unless it runs, then answers its outcome once settled, or
- * `{ pending: true }` after `waitMs`; without `waitMs` (an older mod) it waits
- * for the outcome. Polls while it runs share it. The outcome goes to the polls
- * waiting when it settles, else to the next one; one nobody collects within
- * `keepMs` is dropped, so a later poll starts the work again.
+ * person may keep a file dialog open for minutes. `poll(waitMs, id)`:
+ *
+ * - without `id`, joins the work that runs, else starts it (`open()`): never
+ *   hands it the outcome of earlier work, which nobody may be waiting for;
+ * - with `id`, waits on that work; `{ gone: true }` when it is not this run's
+ *   (another dialog since, a server restart) or its outcome was not collected
+ *   within `keepMs` of settling.
+ *
+ * It answers the outcome once settled, else `{ pending: true, id }` after
+ * `waitMs`; without `waitMs` (an older mod) it waits for the outcome.
  */
-export function waitInPieces(open, { keepMs = 60_000, now = Date.now } = {}) {
-  let running = null // { promise, outcome, settledAt }
-  return async function poll(waitMs) {
-    if (running?.outcome && now() - running.settledAt > keepMs) running = null
-    if (!running) {
-      const entry = { outcome: null, settledAt: 0 }
-      let started
-      try {
-        started = Promise.resolve(open())
-      } catch (error) {
-        started = Promise.reject(error)
-      }
-      entry.promise = started
-        .then(
-          value => ({ value }),
-          error => ({ error }),
-        )
-        .then(outcome => {
-          entry.outcome = outcome
-          entry.settledAt = now()
-          return outcome
-        })
-      running = entry
+export function waitInPieces(open, { keepMs = 5_000, now = Date.now, newId = counter() } = {}) {
+  let entry = null // { id, promise, outcome, settledAt }
+  const start = () => {
+    const started = { id: newId(), outcome: null, settledAt: 0 }
+    let running
+    try {
+      running = Promise.resolve(open())
+    } catch (error) {
+      running = Promise.reject(error)
     }
-    const entry = running
+    started.promise = running
+      .then(
+        value => ({ value }),
+        error => ({ error }),
+      )
+      .then(outcome => {
+        started.outcome = outcome
+        started.settledAt = now()
+        return outcome
+      })
+    return started
+  }
+  return async function poll(waitMs, id) {
+    if (id !== undefined) {
+      const isKept = entry?.id === id && (!entry.outcome || now() - entry.settledAt <= keepMs)
+      if (!isKept) return { gone: true }
+    } else if (!entry || entry.outcome) {
+      entry = start()
+    }
+    const mine = entry
     let timer
     const outcome =
-      entry.outcome ??
+      mine.outcome ??
       (await (waitMs === undefined
-        ? entry.promise
-        : Promise.race([entry.promise, new Promise(resolve => (timer = setTimeout(resolve, waitMs, null)))])))
+        ? mine.promise
+        : Promise.race([mine.promise, new Promise(resolve => (timer = setTimeout(resolve, waitMs, null)))])))
     clearTimeout(timer)
-    if (!outcome) return { pending: true }
-    if (running === entry) running = null
+    if (!outcome) return { pending: true, id: mine.id }
     if (outcome.error) throw outcome.error
     return outcome.value
   }
+}
+
+function counter() {
+  let n = 0
+  return () => String(++n)
 }

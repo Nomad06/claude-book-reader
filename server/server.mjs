@@ -7,6 +7,7 @@
 //   node server.mjs --daemon [--port N]           start detached, wait until healthy, exit
 //   --launched-from PATH                          echoed by /api/health, so the mod can tell its own server
 //   --no-launch                                   never open a browser, file dialog or notification (tests, CI)
+//   --picker-script FILE                          tests: run `node FILE` as the file dialog (it prints a path)
 
 import http from 'node:http'
 import fs from 'node:fs'
@@ -27,10 +28,11 @@ import {
   focusApp,
   noPickerReason,
   notification,
+  pickerOutcome,
 } from './platform.mjs'
 import { nodeVersionProblem } from './node-version.mjs'
 import { clampLevels, errorLine, plainText } from './text.mjs'
-import { chooseWait, shared, tryAgain, waitInPieces } from './shared.mjs'
+import { chooseRequest, shared, tryAgain, waitInPieces } from './shared.mjs'
 import { createPdfSource, sweepImages, withFigures } from './pdf-source.mjs'
 import { calibrate, isScanned, pageBlocks } from './page-blocks.mjs'
 
@@ -57,6 +59,7 @@ const ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`])
 const CAN_LAUNCH = !args['no-launch']
 const LAUNCHED_FROM = typeof args['launched-from'] === 'string' ? args['launched-from'] : null
+const PICKER_SCRIPT = typeof args['picker-script'] === 'string' ? path.resolve(args['picker-script']) : null
 const PROFILE_DIR = path.join(DATA_DIR, 'reader-profile')
 const PAGES_DIR = path.join(DATA_DIR, 'pages')
 const PAGE_CACHE_MAX = 50
@@ -97,6 +100,7 @@ async function daemonize() {
   const log = fs.openSync(LOG_FILE, 'a')
   const childArgs = [fileURLToPath(import.meta.url), '--port', String(PORT), '--data', DATA_DIR]
   if (!CAN_LAUNCH) childArgs.push('--no-launch')
+  if (PICKER_SCRIPT !== null) childArgs.push('--picker-script', PICKER_SCRIPT)
   if (LAUNCHED_FROM !== null) childArgs.push('--launched-from', LAUNCHED_FROM)
   const child = spawn(process.execPath, childArgs, { detached: true, windowsHide: true, stdio: ['ignore', log, log] })
   child.unref()
@@ -282,18 +286,25 @@ const host = {
   homedir: os.homedir(),
 }
 
-/** Runs a plan to completion: { code, stdout, stderr }. */
-function runPlan(plan, timeoutMs) {
+/**
+ * Runs a plan to completion: { code, stdout, stderr, timedOut }. `running`, when
+ * given, holds the child while it runs (so the server can end it on exit).
+ */
+function runPlan(plan, timeoutMs, running = null) {
   return new Promise(resolve => {
-    execFile(
+    const child = execFile(
       plan.command,
       plan.args,
       { timeout: timeoutMs, windowsHide: Boolean(plan.hidden), env: { ...process.env, ...plan.env }, encoding: 'utf8' },
       (error, stdout, stderr) => {
+        running?.delete(child)
         const code = error ? (typeof error.code === 'number' ? error.code : -1) : 0
-        resolve({ code, stdout: stdout ?? '', stderr: stderr ?? (error ? error.message : '') })
+        // execFile kills the child at its timeout and says so with `killed`.
+        const timedOut = Boolean(error?.killed) && error?.code === null
+        resolve({ code, stdout: stdout ?? '', stderr: stderr ?? (error ? error.message : ''), timedOut })
       },
     )
+    running?.add(child)
   })
 }
 
@@ -344,25 +355,36 @@ function notify(title, subtitle, message) {
   if (plan) launchPlan(plan)
 }
 
-async function chooseFile() {
-  if (!CAN_LAUNCH) throw httpError(501, 'The file picker is off (--no-launch).')
-  const plan = filePicker(host)
-  if (!plan) throw httpError(501, noPickerReason(process.platform))
-  const { code, stdout, stderr } = await runPlan(plan, 10 * 60_000)
-  const chosen = stdout.trim().split(/\r?\n/).pop() ?? ''
-  if (code === 0 && chosen) return chosen
-  // A cancel: osascript says -128; zenity, kdialog and the Windows dialog exit 1 quietly.
-  if (/-128|cancel/i.test(stderr) || (code === 1 && !stderr.trim())) return null
-  throw httpError(500, stderr.trim() || `the file dialog failed (exit ${code})`)
+/** How long the file dialog may stay open; the mod waits as long, plus one request. */
+const CHOOSE_DIALOG_MS = 10 * 60_000
+
+/** File dialogs that run now: ended when the server stops, so none is left open. */
+const openPickers = new Set()
+
+function endPickers() {
+  for (const child of openPickers) child.kill()
+  openPickers.clear()
 }
 
-// One file dialog at a time, its outcome kept for the mod's next request: Claude
-// Code gives one request 30 s, a person may keep the dialog open ten minutes.
-const pickBook = waitInPieces(async () => {
-  const chosen = await chooseFile()
-  if (chosen === null) return { cancelled: true }
-  return { book: summary(await addBook(chosen)) }
-})
+/** The path the person picked, or null for a cancel. */
+async function chooseFile() {
+  const plan = PICKER_SCRIPT !== null ? { command: process.execPath, args: [PICKER_SCRIPT] } : CAN_LAUNCH ? filePicker(host) : null
+  if (!plan) throw httpError(501, CAN_LAUNCH ? noPickerReason(process.platform) : 'The file picker is off (--no-launch).')
+  const outcome = pickerOutcome(await runPlan(plan, CHOOSE_DIALOG_MS, openPickers))
+  if (outcome.error) throw httpError(500, outcome.error)
+  return outcome.path ?? null
+}
+
+// One file dialog at a time, its outcome kept a moment for the request that
+// names it: Claude Code gives one request 30 s, a dialog may stay open ten minutes.
+const pickBook = waitInPieces(
+  async () => {
+    const chosen = await chooseFile()
+    if (chosen === null) return { cancelled: true }
+    return { book: summary(await addBook(chosen)) }
+  },
+  { newId: () => crypto.randomUUID() },
+)
 
 /** Brings the app that runs the Claude Code session to the front. */
 async function focusClaude() {
@@ -705,9 +727,10 @@ async function route(req, res) {
     return sendJson(res, 200, { book: summary(await addBook(body.path)) })
   }
   if (p === '/api/choose' && m === 'POST') {
-    // The mod asks again while the dialog is open: { waitMs } says how long one request may wait.
-    const body = await readBody(req)
-    return sendJson(res, 200, await pickBook(chooseWait(body)))
+    // The mod asks again while the dialog is open: { waitMs } says how long one
+    // request may wait, { id } which dialog an earlier answer named.
+    const { waitMs, id } = chooseRequest(await readBody(req))
+    return sendJson(res, 200, await pickBook(waitMs, id))
   }
 
   const pageMatch = /^\/api\/books\/([0-9a-f]{12})\/page\/([^/]{1,12})$/.exec(p)
@@ -840,6 +863,7 @@ async function route(req, res) {
   }
 
   if (p === '/api/shutdown' && m === 'POST') {
+    endPickers()
     sendJson(res, 200, { ok: true })
     await Promise.race([source.closeAll(), sleep(2000)])
     await saveNow()
@@ -880,6 +904,8 @@ async function serve() {
     process.on(signal, () => saveNow().finally(() => process.exit(0)))
   }
   process.on('SIGHUP', () => {})
+  // However the server stops, an open file dialog goes with it.
+  process.on('exit', endPickers)
 }
 
 // ---------------------------------------------------------------- utils

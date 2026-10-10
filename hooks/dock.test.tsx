@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BAND_PROPS, mountDock, world } from './test-world.ts'
+import { BAND_PROPS, mountDock, realDelay, world } from './test-world.ts'
 import type { Reader, TestDollar, TestOn } from './test-world.ts'
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -181,7 +181,7 @@ const RUN_BOOK = { origin: { kind: 'composer' }, presentation: { isFullscreen: t
 
 describe('/book dock', () => {
   // `$.command.run` answers before the command's unawaited open or fold settles.
-  const settle = () => new Promise(resolve => setTimeout(resolve, 50))
+  const settle = () => realDelay(50)
 
   test('opens the dock, then folds it to a badge, then opens it again', async ($, on) => {
     const reader = { viewers: 0, hasBook: true }
@@ -248,7 +248,7 @@ describe('/book dock', () => {
 })
 
 describe('final review fixes', () => {
-  const settle = () => new Promise(resolve => setTimeout(resolve, 50))
+  const settle = () => realDelay(50)
 
   test('the dock keeps following a reader that connects after the first tick', async ($, on) => {
     const reader = { viewers: 0, hasBook: true }

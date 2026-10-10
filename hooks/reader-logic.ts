@@ -139,7 +139,8 @@ export function tocRows(title: string, page: string, level: number, width: numbe
     const fill = width - textWidth(text) - textWidth(page) - 2
     return fill >= MIN_LEADER ? { text, leader: LEADER.repeat(fill), page } : null
   }
-  const last = rows.length ? tail(rows[rows.length - 1].text) : null
+  const lastRow = rows.at(-1)
+  const last = lastRow ? tail(lastRow.text) : null
   if (last) rows[rows.length - 1] = last
   else rows.push(tail(indent) ?? { text: indent, leader: LEADER.repeat(MIN_LEADER), page })
   return rows

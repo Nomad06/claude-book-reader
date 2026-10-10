@@ -45,8 +45,11 @@ describe('reader logic', () => {
   })
 })
 
-/** A toc row as the pane draws it. */
-const line = (row: { text: string; leader: string; page: string }) => `${row.text}${row.leader ? ` ${row.leader} ${row.page}` : ''}`
+/** A toc row as the pane draws it; a row that is not there fails the test. */
+const line = (row: { text: string; leader: string; page: string } | undefined) => {
+  if (!row) throw new Error('no such toc row')
+  return `${row.text}${row.leader ? ` ${row.leader} ${row.page}` : ''}`
+}
 
 describe('reader layout helpers', () => {
   test('text width counts display columns', () => {
@@ -87,8 +90,8 @@ describe('reader layout helpers', () => {
       expect(row.leader).toBe('')
       expect(textWidth(row.text)).toBeLessThanOrEqual(30)
     }
-    const last = rows[rows.length - 1]
-    expect(last.leader.length).toBeGreaterThanOrEqual(2)
+    const last = rows.at(-1)
+    expect(last?.leader.length).toBeGreaterThanOrEqual(2)
     expect(textWidth(line(last))).toBe(30)
     expect(line(last).endsWith(' 460')).toBe(true)
     expect(rows.map(r => r.text).join(' ').replace(/\s+/g, ' ').trim()).toBe('Построение приложений с использованием моделей')

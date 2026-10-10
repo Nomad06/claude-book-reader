@@ -15,6 +15,7 @@ import {
   WINDOWS_FOCUS,
   WINDOWS_NOTIFICATION,
   WINDOWS_PICKER,
+  WINDOWS_RAISE_READER,
   appWindow,
   appleString,
   cleanTarget,
@@ -24,6 +25,7 @@ import {
   focusApp,
   noPickerReason,
   notification,
+  pickerOutcome,
   profilePattern,
   raiseAppWindow,
 } from '../server/platform.mjs'
@@ -219,6 +221,7 @@ describe('Windows', () => {
     ['notification', WINDOWS_NOTIFICATION],
     ['close reader', WINDOWS_CLOSE_READER],
     ['focus', WINDOWS_FOCUS],
+    ['raise reader', WINDOWS_RAISE_READER],
     ["mod's window search", WINDOWS_HOST_PID],
   ]) {
     test(`the ${name} script is valid PowerShell`, { skip: shell ? false : 'no PowerShell here' }, () => {
@@ -303,5 +306,26 @@ describe('the profile of the reader is matched whole', () => {
       assert.doesNotMatch(decodeScript(plan), /CommandLine\.Contains\(\$marker\)/)
       assert.match(decodeScript(plan), /EndsWith\(\$marker\)/)
     }
+  })
+})
+
+describe('what the file dialog came to', () => {
+  test('a path printed with exit 0 is the pick; the last line counts', () => {
+    assert.deepEqual(pickerOutcome({ code: 0, stdout: 'noise\n/books/dune.pdf\n', stderr: '' }), { path: '/books/dune.pdf' })
+  })
+
+  test('a cancel: osascript -128, or exit 1 with nothing said (zenity, kdialog, the Windows dialog)', () => {
+    assert.deepEqual(pickerOutcome({ code: 1, stdout: '', stderr: 'execution error: User canceled. (-128)' }), { cancelled: true })
+    assert.deepEqual(pickerOutcome({ code: 1, stdout: '', stderr: '' }), { cancelled: true })
+  })
+
+  test('a dialog closed at its time limit says so, not "exit -1"', () => {
+    const outcome = pickerOutcome({ code: -1, stdout: '', stderr: '', timedOut: true })
+    assert.match(outcome.error, /file dialog was open too long/)
+  })
+
+  test('any other failure is its own error line', () => {
+    assert.deepEqual(pickerOutcome({ code: 2, stdout: '', stderr: 'no display\n' }), { error: 'no display' })
+    assert.deepEqual(pickerOutcome({ code: 3, stdout: '', stderr: '' }), { error: 'the file dialog failed (exit 3)' })
   })
 })

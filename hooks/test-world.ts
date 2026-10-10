@@ -41,6 +41,8 @@ export type Reader = {
   choosePending?: number
   /** The dialog's outcome: the current book picked, else (default) a cancel. */
   choosesBook?: boolean
+  /** The dialog is gone after its first "still open" (a server restart, another dialog since). */
+  chooseGone?: boolean
 }
 
 export type Host = {
@@ -65,6 +67,19 @@ export type Host = {
   manifestVersion?: string
 }
 
+// The test runner has timers; the mod's own environment (and so its types) has none.
+const runnerTimers = globalThis as unknown as { setTimeout: (fn: () => void, ms: number) => unknown }
+
+/**
+ * Waits `ms` of real time (not the mocked clock): for work a command starts
+ * once its answer is out, which no promise of the test's own settles.
+ */
+export function realDelay(ms: number): Promise<void> {
+  return new Promise(resolve => {
+    runnerTimers.setTimeout(resolve, ms)
+  })
+}
+
 const ok = (stdout: string, exitCode = 0) => ({
   value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
 })
@@ -83,7 +98,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   }
   const task = { state: 'idle', seq: 0, acked: true }
   let pluginRoot = ''
-  const baseEnv = host.os === 'windows' ? { OS: 'Windows_NT', ProgramFiles: 'C:\\Program Files' } : {}
+  const baseEnv: Record<string, string> = host.os === 'windows' ? { OS: 'Windows_NT', ProgramFiles: 'C:\\Program Files' } : {}
   mock.env(on, { ...baseEnv, ...host.env })
   on('fs.read', ($, e) => {
     // On Windows the engine hands the path over with backslashes.
@@ -106,7 +121,11 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   })
   const state = <K extends keyof PluginState['book-reader']>(key: K) => stateValues.get(key) as PluginState['book-reader'][K] | undefined
   const clock = mock.clock(on, { now: 1_000 })
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   const statuses: (string | undefined)[] = []
   on('ui.status', ($, e) => {
     statuses.push(e.text)
@@ -193,10 +212,13 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
       case '/api/books':
         return json({ book: { ...BOOK, path: body?.path } })
       case '/api/choose':
-        // The server answers "still open" while the dialog is (each request within its waitMs).
+        // The server answers "still open" while the dialog is (each request within its
+        // waitMs), naming the dialog; a request that names another one finds it gone.
+        if (body?.id !== undefined && body.id !== 'dialog-1') return json({ gone: true })
+        if (body?.id !== undefined && reader.chooseGone) return json({ gone: true })
         if ((reader.choosePending ?? 0) > 0) {
           reader.choosePending = (reader.choosePending ?? 0) - 1
-          return json({ pending: true })
+          return json({ pending: true, id: 'dialog-1' })
         }
         return json(reader.choosesBook ? { book } : { cancelled: true })
       case '/api/show':
@@ -226,7 +248,7 @@ export function world(on: On, reader: Reader, hostOptions: Host = {}) {
   })
   const posted = (path: string) => calls.filter(c => c.method === 'POST' && c.path === path)
   const daemon = () => runs.find(argv => argv.includes('--daemon'))
-  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses, scrolls, release, state, logs }
+  return { calls, runs, clock, posted, daemon, root: () => pluginRoot, opens, panes, statuses, scrolls, release, state, logs, toasts }
 }
 
 export const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const

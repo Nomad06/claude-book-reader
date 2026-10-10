@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BAND_PROPS, BOOK, RUN, mountDock, world } from './test-world.ts'
+import { BAND_PROPS, BOOK, RUN, mountDock, realDelay, world } from './test-world.ts'
 import type { Reader } from './test-world.ts'
 
 const OTHER = 'b0b0b0b0b0b0'
@@ -149,7 +149,7 @@ describe('book-reader', () => {
   test('/book choose keeps waiting while the file dialog stays open past one request', async ($, on) => {
     // The engine gives one request 30 s; the server answers "still open" before that.
     const reader: Reader = { viewers: 0, hasBook: true, choosePending: 3, choosesBook: true }
-    const { posted } = world(on, reader)
+    const { posted, toasts } = world(on, reader)
 
     const chosen = await $.command.run({ ...RUN, command: 'book', args: 'choose' })
     expect(chosen.text).toContain('Now reading “Dune”')
@@ -159,6 +159,26 @@ describe('book-reader', () => {
       expect(typeof ask.body?.waitMs).toBe('number')
       expect(ask.body?.waitMs as number).toBeLessThan(30_000)
     }
+    // The first request opens a dialog; the next ones name it.
+    expect(asks.map(ask => ask.body?.id)).toEqual([undefined, 'dialog-1', 'dialog-1', 'dialog-1'])
+    // Once, when it stays open: the dialog may be behind the terminal.
+    expect(toasts.filter(text => text.includes('file dialog'))).toHaveLength(1)
+  })
+
+  test('/book choose: a pick at once shows no reminder', async ($, on) => {
+    const { toasts } = world(on, { viewers: 0, hasBook: true, choosesBook: true })
+
+    const chosen = await $.command.run({ ...RUN, command: 'book', args: 'choose' })
+    expect(chosen.text).toContain('Now reading “Dune”')
+    expect(toasts.filter(text => text.includes('file dialog'))).toHaveLength(0)
+  })
+
+  test('/book choose: a dialog that is gone (the server restarted) says so', async ($, on) => {
+    const { posted } = world(on, { viewers: 0, hasBook: true, choosePending: 1, chooseGone: true })
+
+    const chosen = await $.command.run({ ...RUN, command: 'book', args: 'choose' })
+    expect(chosen.text).toContain('the file dialog is gone')
+    expect(posted('/api/choose')).toHaveLength(2)
   })
 
   test('/book choose: a dialog cancelled after a while is no book', async ($, on) => {
@@ -169,11 +189,11 @@ describe('book-reader', () => {
     expect(posted('/api/choose')).toHaveLength(3)
   })
 
-  test('/book choose stops waiting once the dialog has had its ten minutes', async ($, on) => {
+  test('/book choose stops asking a server that never settles the dialog', async ($, on) => {
     const { posted } = world(on, { viewers: 0, hasBook: true, choosePending: 1_000 })
 
     const chosen = await $.command.run({ ...RUN, command: 'book', args: 'choose' })
-    expect(chosen.text).toContain('the file dialog is still open')
+    expect(chosen.text).toContain('no answer from the file dialog')
     // Twenty-second waits: about ten minutes of them, then it stops.
     expect(posted('/api/choose').length).toBeLessThan(40)
   })
@@ -341,7 +361,7 @@ describe('book-reader', () => {
     const open = await $.command.run({ ...RUN, command: 'book', args: 'open' })
     expect(open.text).toContain('Dune · p. 42/300')
     // The pane's work starts once the answer is out; wait (real time) for its page.
-    for (let i = 0; i < 40 && state('readerPage') === undefined; i++) await new Promise(resolve => setTimeout(resolve, 25))
+    for (let i = 0; i < 40 && state('readerPage') === undefined; i++) await realDelay(25)
     expect(posted('/api/show')).toHaveLength(0)
     expect(opens).toEqual([{ id: 'book-dock', columns: 72 }])
     expect(state('dockView')).toBe('reader')
@@ -401,7 +421,7 @@ describe('book-reader', () => {
 
   test('graphics is detected from the environment once per session', async ($, on) => {
     const { state } = world(on, { viewers: 0, hasBook: true }, { env: { TERM_PROGRAM: 'ghostty' } })
-    await $.session.start({ cwd: '/home/me/project' })
+    await $.session.start({ cwd: '/home/me/project', surface: 'terminal', isInteractive: true })
     expect(state('graphics')).toBe(true)
   })
 
@@ -436,7 +456,7 @@ describe('book-reader', () => {
     reader.book = { id: OTHER, title: 'Emma', page: 9, pages: 50 }
     await $.command.run({ ...RUN, command: 'book', args: '1' })
     // The pane's work starts once the answer is out; wait (real time) for its failed page.
-    for (let i = 0; i < 40 && !String(state('readerNote')).includes('Could not load page 9'); i++) await new Promise(resolve => setTimeout(resolve, 25))
+    for (let i = 0; i < 40 && !String(state('readerNote')).includes('Could not load page 9'); i++) await realDelay(25)
     expect(state('readerNote')).toContain('Could not load page 9')
     expect(state('readerPage')?.bookId).toBe(BOOK.id)
     await ui.press({ key: 'reader-mark' })
@@ -469,7 +489,7 @@ describe('book-reader', () => {
     await clock.advance(5_000)
     const ui = await mountDock($, 'terminal')
     const slow = ui.press({ key: 'reader-next' })
-    for (let i = 0; i < 40 && !isGated; i++) await new Promise(resolve => setTimeout(resolve, 10))
+    for (let i = 0; i < 40 && !isGated; i++) await realDelay(10)
     expect(isGated).toBe(true)
     await $.ui.input({ plugin: 'book-reader', key: 'reader-goto', text: '10' })
     expect(state('readerPage')?.page).toBe(10)
@@ -484,7 +504,7 @@ describe('book-reader', () => {
   test('graphics detection that fails reads as no graphics, and the session still starts', async ($, on) => {
     on('env.get', { name: 'TERM_PROGRAM' }, () => ({ deny: 'not in this test' }))
     const { state } = world(on, { viewers: 0, hasBook: true }, { env: { TERM: 'xterm-kitty' } })
-    const started = await $.session.start({ cwd: '/home/me/project' })
+    const started = await $.session.start({ cwd: '/home/me/project', surface: 'terminal', isInteractive: true })
     expect(started).toEqual({ cwd: '/home/me/project' })
     expect(state('graphics')).toBe(false)
   })

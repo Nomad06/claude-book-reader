@@ -94,6 +94,21 @@ export function noPickerReason(platform) {
 }
 
 /**
+ * What a run of the file dialog came to: `{ path }`, `{ cancelled: true }` or
+ * `{ error }`. `timedOut`: it was closed at its time limit.
+ *
+ * @param {{ code: number, stdout: string, stderr: string, timedOut?: boolean }} run
+ */
+export function pickerOutcome({ code, stdout, stderr, timedOut = false }) {
+  if (timedOut) return { error: 'the file dialog was open too long and was closed; run /book choose again' }
+  const chosen = stdout.trim().split(/\r?\n/).pop() ?? ''
+  if (code === 0 && chosen) return { path: chosen }
+  // A cancel: osascript says -128; zenity, kdialog and the Windows dialog exit 1 quietly.
+  if (/-128|cancel/i.test(stderr) || (code === 1 && !stderr.trim())) return { cancelled: true }
+  return { error: stderr.trim() || `the file dialog failed (exit ${code})` }
+}
+
+/**
  * A desktop notification.
  *
  * @param {{ platform: string, has: (command: string) => boolean,

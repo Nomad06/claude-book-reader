@@ -6,9 +6,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { chooseWait, waitInPieces } from '../server/shared.mjs'
+import { chooseRequest, waitInPieces } from '../server/shared.mjs'
 
-/** A dialog the test closes by hand: `settle(value)` or `fail(error)`. */
+/** A dialog the test closes by hand: `settle(value)` or `fail(error)` closes the last one opened. */
 function dialog() {
   const opened = []
   const open = () =>
@@ -23,22 +23,29 @@ function dialog() {
   }
 }
 
+const tick = () => new Promise(resolve => setImmediate(resolve))
+
+/** Ids d1, d2, … in the order the dialogs open. */
+function ids() {
+  let n = 0
+  return () => `d${++n}`
+}
+
 describe('a file dialog waited on in pieces', () => {
-  test('a poll answers "still open" after its wait, and the next one gets the pick', async () => {
+  test('a poll answers "still open" with the dialog id; a poll with that id gets the pick', async () => {
     const d = dialog()
-    const poll = waitInPieces(d.open)
-    assert.deepEqual(await poll(20), { pending: true })
+    const poll = waitInPieces(d.open, { newId: ids() })
+    assert.deepEqual(await poll(20), { pending: true, id: 'd1' })
     assert.equal(d.opened.length, 1)
-    const second = poll(5_000)
+    const second = poll(5_000, 'd1')
     d.settle({ book: { id: 'abc' } })
     assert.deepEqual(await second, { book: { id: 'abc' } })
-    // The dialog opened once for both polls.
     assert.equal(d.opened.length, 1)
   })
 
-  test('polls during one dialog share it; the outcome goes to each of them', async () => {
+  test('requests without an id while a dialog is open join it; the outcome goes to each', async () => {
     const d = dialog()
-    const poll = waitInPieces(d.open)
+    const poll = waitInPieces(d.open, { newId: ids() })
     const a = poll(5_000)
     const b = poll(5_000)
     d.settle({ cancelled: true })
@@ -46,67 +53,84 @@ describe('a file dialog waited on in pieces', () => {
     assert.equal(d.opened.length, 1)
   })
 
-  test('once its outcome is collected, the next poll opens a new dialog', async () => {
+  test('an outcome that settled between two polls goes to the next poll with its id', async () => {
     const d = dialog()
-    const poll = waitInPieces(d.open)
-    const first = poll(5_000)
-    d.settle({ cancelled: true })
-    await first
-    const again = poll(20)
-    assert.equal(d.opened.length, 2)
-    assert.deepEqual(await again, { pending: true })
-  })
-
-  test('an outcome that settled between two polls waits for the next one', async () => {
-    const d = dialog()
-    const poll = waitInPieces(d.open)
-    assert.deepEqual(await poll(10), { pending: true })
+    const poll = waitInPieces(d.open, { newId: ids() })
+    assert.deepEqual(await poll(10), { pending: true, id: 'd1' })
     d.settle({ book: { id: 'abc' } })
-    await new Promise(resolve => setImmediate(resolve))
-    assert.deepEqual(await poll(5_000), { book: { id: 'abc' } })
+    await tick()
+    assert.deepEqual(await poll(5_000, 'd1'), { book: { id: 'abc' } })
     assert.equal(d.opened.length, 1)
   })
 
-  test('an outcome nobody collects in time is dropped: a later poll opens a new dialog', async () => {
+  test("a request without an id never collects an earlier dialog's outcome: it opens a new dialog", async () => {
     const d = dialog()
-    let now = 1_000
-    const poll = waitInPieces(d.open, { keepMs: 60_000, now: () => now })
-    assert.deepEqual(await poll(10), { pending: true })
-    d.settle({ book: { id: 'old' } })
-    await new Promise(resolve => setImmediate(resolve))
-    now += 60_001
-    assert.deepEqual(await poll(10), { pending: true })
+    const poll = waitInPieces(d.open, { newId: ids() })
+    assert.deepEqual(await poll(10), { pending: true, id: 'd1' })
+    d.settle({ book: { id: 'abandoned' } })
+    await tick()
+    assert.deepEqual(await poll(10), { pending: true, id: 'd2' })
     assert.equal(d.opened.length, 2)
+    // The abandoned dialog's id no longer reaches its outcome.
+    assert.deepEqual(await poll(10, 'd1'), { gone: true })
   })
 
-  test('a failed dialog throws to the poll that collects it, then is gone', async () => {
+  test('an outcome its id does not collect within keepMs is gone', async () => {
     const d = dialog()
-    const poll = waitInPieces(d.open)
+    let now = 1_000
+    const poll = waitInPieces(d.open, { keepMs: 5_000, now: () => now, newId: ids() })
+    assert.deepEqual(await poll(10), { pending: true, id: 'd1' })
+    d.settle({ book: { id: 'late' } })
+    await tick()
+    now += 5_001
+    assert.deepEqual(await poll(10, 'd1'), { gone: true })
+    assert.equal(d.opened.length, 1)
+  })
+
+  test('an id this server never gave (a restart since) is gone, and opens nothing', async () => {
+    const d = dialog()
+    const poll = waitInPieces(d.open, { newId: ids() })
+    assert.deepEqual(await poll(10, 'from-before'), { gone: true })
+    assert.equal(d.opened.length, 0)
+  })
+
+  test('a failed dialog throws to the poll that collects it; a new request opens a new one', async () => {
+    const d = dialog()
+    const poll = waitInPieces(d.open, { newId: ids() })
     const first = poll(5_000)
     d.fail(new Error('no dialog here'))
     await assert.rejects(first, /no dialog here/)
     const again = poll(10)
     assert.equal(d.opened.length, 2)
-    assert.deepEqual(await again, { pending: true })
+    assert.deepEqual(await again, { pending: true, id: 'd2' })
   })
 
-  test('without a wait (an older mod) the poll waits for the outcome itself', async () => {
+  test('without a wait (an older mod) a request waits for the outcome itself, joining an open dialog', async () => {
     const d = dialog()
-    const poll = waitInPieces(d.open)
+    const poll = waitInPieces(d.open, { newId: ids() })
+    assert.deepEqual(await poll(10), { pending: true, id: 'd1' })
     const whole = poll(undefined)
     setTimeout(() => d.settle({ book: { id: 'abc' } }), 30)
     assert.deepEqual(await whole, { book: { id: 'abc' } })
+    assert.equal(d.opened.length, 1)
   })
 })
 
-describe('how long one /api/choose request waits', () => {
+describe('what one /api/choose request asks', () => {
   test("the mod's waitMs, at most 25 s; none (an older mod) or a bad one waits for the outcome", () => {
-    assert.equal(chooseWait({ waitMs: 20_000 }), 20_000)
-    assert.equal(chooseWait({ waitMs: 0 }), 0)
-    assert.equal(chooseWait({ waitMs: 90_000 }), 25_000)
-    assert.equal(chooseWait({}), undefined)
-    assert.equal(chooseWait({ waitMs: 'soon' }), undefined)
-    assert.equal(chooseWait({ waitMs: -1 }), undefined)
-    assert.equal(chooseWait(null), undefined)
+    assert.equal(chooseRequest({ waitMs: 20_000 }).waitMs, 20_000)
+    assert.equal(chooseRequest({ waitMs: 0 }).waitMs, 0)
+    assert.equal(chooseRequest({ waitMs: 90_000 }).waitMs, 25_000)
+    assert.equal(chooseRequest({}).waitMs, undefined)
+    assert.equal(chooseRequest({ waitMs: 'soon' }).waitMs, undefined)
+    assert.equal(chooseRequest({ waitMs: -1 }).waitMs, undefined)
+    assert.equal(chooseRequest(null).waitMs, undefined)
+  })
+
+  test('the dialog id it echoes: a short string, else none', () => {
+    assert.equal(chooseRequest({ id: 'a1b2' }).id, 'a1b2')
+    assert.equal(chooseRequest({}).id, undefined)
+    assert.equal(chooseRequest({ id: 42 }).id, undefined)
+    assert.equal(chooseRequest({ id: 'x'.repeat(65) }).id, undefined)
   })
 })

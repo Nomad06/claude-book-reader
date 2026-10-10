@@ -19,9 +19,13 @@
     "test:server": "node --test \"test/*.test.mjs\"",
     "test:mod": "claude plugin test .",
     "validate": "claude plugin validate .",
+    "typecheck": "node scripts/typecheck.mjs",
     "update-pdfjs": "sh scripts/update-pdfjs.sh"
   },
   "optionalDependencies": {
     "@napi-rs/canvas": "^1.0.10"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
   }
 }

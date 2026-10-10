@@ -881,22 +881,30 @@ async function runBook($: EngineInterface, raw: string): Promise<string> {
   return `📖 Now reading “${added.book.title}” · ${where(shown ?? added.book)}\n${await autoLine($)}`
 }
 
-// The engine gives one request 30 s; the server's file dialog stays open up to
-// ten minutes. Each request waits CHOOSE_WAIT_MS at most, then asks again.
+// The engine gives one request 30 s; the server keeps its file dialog open up
+// to ten minutes, then closes it and says so. Each request waits CHOOSE_WAIT_MS
+// at most and the next one names the dialog the server answered with. The mod
+// stops asking one request after the server's limit: only a server that never
+// settles the dialog gets that far.
 const CHOOSE_WAIT_MS = 20_000
 const CHOOSE_LIMIT_MS = 10 * 60_000 + CHOOSE_WAIT_MS
 
+type ChooseAnswer = { pending?: boolean; id?: string; gone?: boolean; cancelled?: boolean; book?: BookSummary }
+
 async function chooseBook($: EngineInterface): Promise<{ cancelled?: boolean; book?: BookSummary }> {
   const until = (await $.clock.now()) + CHOOSE_LIMIT_MS
+  let id: string | undefined
   // A server that answered at once each time would loop: count the requests too.
   for (let asked = 0; asked * CHOOSE_WAIT_MS < CHOOSE_LIMIT_MS; asked++) {
-    const answer = await api<{ pending?: boolean; cancelled?: boolean; book?: BookSummary }>($, 'POST', '/api/choose', {
-      waitMs: CHOOSE_WAIT_MS,
-    })
+    const answer = await api<ChooseAnswer>($, 'POST', '/api/choose', { waitMs: CHOOSE_WAIT_MS, ...(id ? { id } : {}) })
+    if (answer.gone) throw new Error('the file dialog is gone (the reader server restarted?); run /book choose again')
     if (!answer.pending) return answer
+    // Still open: the dialog may be behind the terminal.
+    if (id === undefined) $.ui.toast('📖 Choose a PDF in the file dialog (it may be behind this window)', { timeoutMs: 8000 })
+    id = answer.id
     if ((await $.clock.now()) >= until) break
   }
-  throw new Error('the file dialog is still open; pick a PDF there, then run /book')
+  throw new Error('no answer from the file dialog; run /book choose again')
 }
 
 async function autoLine($: EngineInterface): Promise<string> {

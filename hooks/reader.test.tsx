@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Block, ReaderPage } from '../types'
-import { BAND_PROPS, BOOK, mountDock, RUN, world } from './test-world.ts'
+import { BAND_PROPS, BOOK, mountDock, realDelay, RUN, world } from './test-world.ts'
 import type { Reader } from './test-world.ts'
 
 const OTHER = 'b0b0b0b0b0b0'
@@ -395,7 +395,7 @@ describe('reading through a task', () => {
     expect(state('readerShownAt')).toBe(6_000)
     await $.command.run({ ...RUN, command: 'book', args: 'dock' })
     // `$.command.run` answers before the command's unawaited fold settles.
-    for (let i = 0; i < 2; i++) await new Promise(resolve => setTimeout(resolve, 50))
+    for (let i = 0; i < 2; i++) await realDelay(50)
     expect(panes).toHaveLength(0)
     expect(state('readerShownAt')).toBeNull()
     await clock.advance(20_000)
