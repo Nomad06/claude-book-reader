@@ -30,8 +30,8 @@ jobs:
           - os: ubuntu-latest
             node: '22.13'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
       - if: matrix.canvas
@@ -52,8 +52,8 @@ jobs:
     # writes to .claude-plugin/types/ when a session loads the mod, and nothing
     # writes them without one (validate and test do not). Run it locally.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - run: npm install --global @anthropic-ai/claude-code@latest

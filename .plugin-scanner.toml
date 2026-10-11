@@ -1,0 +1,7 @@
+# Settings for HOL's plugin-scanner (https://github.com/hashgraph-online/hol-guard).
+[scanner]
+# viewer/vendor/pdfjs is Mozilla's PDF.js 6.4.299, bundled unchanged. Its
+# minified build/pdf.min.mjs has a variable `t` set from a template string and,
+# later, an unrelated regex helper called `exec(t…)`, which the shell-injection
+# rule reads as a shell call. Nothing in this repository runs a shell with it.
+ignore_paths = ["viewer/vendor/*"]

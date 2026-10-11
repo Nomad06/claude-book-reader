@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # The actions in .github/workflows are pinned to commit SHAs; this keeps them current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  # Only dev and optional dependencies (typescript, @napi-rs/canvas); the reader itself has none.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
