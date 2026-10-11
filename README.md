@@ -9,6 +9,8 @@ tells you and asks whether to close the book or keep reading.
 
 ![When the task finishes: close the book or keep reading](docs/task-finished.jpg)
 
+<img width="989" height="884" alt="image" src="https://github.com/user-attachments/assets/12225eaa-51b1-4305-9159-4cfcef387be0" />
+
 > A community mod for Claude Code. Not affiliated with or endorsed by Anthropic.
 
 ## Features
