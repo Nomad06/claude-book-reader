@@ -23,7 +23,7 @@
     "update-pdfjs": "sh scripts/update-pdfjs.sh"
   },
   "optionalDependencies": {
-    "@napi-rs/canvas": "^1.0.10"
+    "@napi-rs/canvas": "^1.0.13"
   },
   "devDependencies": {
     "typescript": "6.0.3"
